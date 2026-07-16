@@ -93,8 +93,8 @@ async function pollStatus() {
                     <h2>${p.name}</h2>
                 </div>
                 <div class="pair-stats">
-                    <div class="stat"><span class="stat-label">Source</span><span class="stat-value">${p.source_bucket || p.source_bucket_id.slice(0,8)}</span></div>
-                    <div class="stat"><span class="stat-label">Target</span><span class="stat-value">${p.target_bucket || p.target_bucket_id.slice(0,8)}</span></div>
+                    <div class="stat"><span class="stat-label">Source</span><span class="stat-value">${p.source_name || p.source_bucket || p.source_bucket_id.slice(0,8)}</span></div>
+                    <div class="stat"><span class="stat-label">Target</span><span class="stat-value">${p.target_name || p.target_bucket || p.target_bucket_id.slice(0,8)}</span></div>
                     <div class="stat"><span class="stat-label">Interval</span><span class="stat-value">${p.sync_interval}s</span></div>
                     <div class="stat"><span class="stat-label">Workers</span><span class="stat-value">${p.worker_count}</span></div>
                     <div class="stat"><span class="stat-label">Last Sync</span><span class="stat-value">${lastSync}</span></div>
