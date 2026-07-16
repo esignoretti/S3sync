@@ -109,8 +109,8 @@ func promptInt(scanner *bufio.Scanner, label string, defaultVal int) int {
 func bucketFromPrompts(scanner *bufio.Scanner) *config.Bucket {
 	b := &config.Bucket{}
 	b.Name = prompt(scanner, "Config name", "")
-	b.Endpoint = prompt(scanner, "S3 endpoint URL", "https://s3.amazonaws.com")
-	b.Region = prompt(scanner, "Region", "us-east-1")
+	b.Endpoint = prompt(scanner, "S3 endpoint URL", "https://s3.cubbit.eu")
+	b.Region = prompt(scanner, "Region", "eu-west-1")
 	b.BucketName = prompt(scanner, "Bucket name", "")
 	b.AccessKey = prompt(scanner, "Access key", "")
 	b.SecretKey = prompt(scanner, "Secret key", "")

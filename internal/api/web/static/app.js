@@ -59,7 +59,7 @@ document.addEventListener('alpine:init', () => {
 
 function defaultForm() {
     return {
-        name: '', endpoint: 'https://s3.amazonaws.com', region: 'us-east-1',
+        name: '', endpoint: 'https://s3.cubbit.eu', region: 'eu-west-1',
         bucket_name: '', access_key: '', secret_key: '',
         versioning: false, object_lock: false,
         retention_mode: 'GOVERNANCE', retention_days: 365,
@@ -100,6 +100,7 @@ async function pollStatus() {
                 </div>
                 <div class="pair-actions">
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
+                    <button class="btn btn-sm ${p.enabled ? 'btn-danger' : 'btn-secondary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Stop' : 'Start'}</button>
                     <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
                 </div>
             `;
@@ -117,6 +118,13 @@ async function pollStatus() {
                 if (!confirm('Delete this sync pair?')) return;
                 btn.disabled = true; btn.textContent = 'Deleting...';
                 try { await fetch('/api/sync-pairs/' + btn.dataset.id, { method: 'DELETE' }); } catch(e) {}
+                pollStatus();
+            });
+        });
+        grid.querySelectorAll('[data-action="toggle"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                btn.disabled = true; btn.textContent = '...';
+                try { await fetch('/api/sync-pairs/' + btn.dataset.id + '/disable', { method: 'POST' }); } catch(e) {}
                 pollStatus();
             });
         });

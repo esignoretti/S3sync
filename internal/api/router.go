@@ -34,6 +34,7 @@ func (s *Server) Router() *gin.Engine {
 		api.PUT("/sync-pairs/:id", s.updateSyncPair)
 		api.DELETE("/sync-pairs/:id", s.deleteSyncPair)
 		api.POST("/sync-pairs/:id/sync", s.triggerSync)
+		api.POST("/sync-pairs/:id/disable", s.disableSyncPair)
 		api.GET("/sync-pairs/:id/status", s.syncStatus)
 
 		api.GET("/health", s.health)

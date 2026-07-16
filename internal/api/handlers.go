@@ -139,6 +139,20 @@ func (s *Server) deleteSyncPair(c *gin.Context) {
 	respond(c, http.StatusOK, gin.H{"deleted": true})
 }
 
+func (s *Server) disableSyncPair(c *gin.Context) {
+	p, err := s.repo.GetSyncPair(c.Param("id"))
+	if err != nil {
+		respondError(c, http.StatusNotFound, err.Error())
+		return
+	}
+	p.Enabled = !p.Enabled
+	if err := s.repo.UpdateSyncPair(p); err != nil {
+		respondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond(c, http.StatusOK, gin.H{"enabled": p.Enabled})
+}
+
 func (s *Server) triggerSync(c *gin.Context) {
 	go func() {
 		if err := sync.RunOneShot(c.Request.Context(), s.repo, c.Param("id"), s.cacheDir); err != nil {

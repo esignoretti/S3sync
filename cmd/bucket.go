@@ -163,8 +163,8 @@ var bucketDeleteCmd = &cobra.Command{
 }
 
 func init() {
-	bucketAddCmd.Flags().String("endpoint", "", "S3 endpoint URL")
-	bucketAddCmd.Flags().String("region", "us-east-1", "AWS region")
+	bucketAddCmd.Flags().String("endpoint", "https://s3.cubbit.eu", "S3 endpoint URL")
+	bucketAddCmd.Flags().String("region", "eu-west-1", "AWS region")
 	bucketAddCmd.Flags().String("bucket-name", "", "Bucket name on S3")
 	bucketAddCmd.Flags().String("access-key", "", "Access key")
 	bucketAddCmd.Flags().String("secret-key", "", "Secret key")
