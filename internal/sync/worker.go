@@ -34,13 +34,14 @@ func NewWorkerPool(workers int, client *s3.Client, source, target string,
 	}
 }
 
-func (wp *WorkerPool) Run(ctx context.Context, actions []SyncAction) (int, int) {
+func (wp *WorkerPool) Run(ctx context.Context, actions []SyncAction) ([]SyncAction, int, int) {
 	if len(actions) == 0 {
-		return 0, 0
+		return nil, 0, 0
 	}
 
 	type result struct {
-		err error
+		action SyncAction
+		err    error
 	}
 	ch := make(chan SyncAction, len(actions))
 	for _, a := range actions {
@@ -72,7 +73,7 @@ func (wp *WorkerPool) Run(ctx context.Context, actions []SyncAction) (int, int) 
 				} else {
 					slog.Info("worker done", "key", a.Key, "action", a.Type, "ms", time.Since(start).Milliseconds())
 				}
-				results <- result{err: err}
+				results <- result{action: a, err: err}
 				if wp.progress != nil {
 					wp.mu.Lock()
 					wp.progress.Completed++
@@ -85,18 +86,18 @@ func (wp *WorkerPool) Run(ctx context.Context, actions []SyncAction) (int, int) 
 		}()
 	}
 
-	succeeded := 0
+	var succeeded []SyncAction
 	failed := 0
 	for i := 0; i < len(actions); i++ {
 		r := <-results
 		if r.err != nil {
 			failed++
 		} else {
-			succeeded++
+			succeeded = append(succeeded, r.action)
 		}
 	}
 
-	return succeeded, failed
+	return succeeded, len(succeeded), failed
 }
 
 func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
@@ -133,8 +134,8 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 }
 
 func (wp *WorkerPool) deleteObject(ctx context.Context, a SyncAction) error {
-	if wp.throttler.WaitLog(ctx, wp.sourceBucket) != nil {
-		return nil
+	if err := wp.throttler.WaitLog(ctx, wp.sourceBucket); err != nil {
+		return err
 	}
 	_, err := wp.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: &wp.targetBucket, Key: &a.Key,

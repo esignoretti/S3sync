@@ -140,23 +140,24 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.progress.Failed = 0
 	e.mu.Unlock()
 
-	succeeded, failed := e.pool.Run(ctx, diff.NewOrChanged)
+	succeeded, succeededCount, failed := e.pool.Run(ctx, diff.NewOrChanged)
 
-	delSucceeded, delFailed := e.pool.Run(ctx, diff.ToDelete)
+	delSucceeded, delSucceededCount, delFailed := e.pool.Run(ctx, diff.ToDelete)
 
 	now := time.Now().UTC()
-	for _, a := range diff.NewOrChanged {
+	for _, a := range succeeded {
 		e.cache.Put(&cache.CachedObject{
 			PairID: e.pair.ID, Key: a.Key,
 			ETag: a.ETag, Size: a.Size,
 			LastModified: a.LastModified, SyncedAt: now,
 		})
 	}
-	for _, a := range diff.ToDelete {
+	// Remove from cache items that were successfully deleted
+	for _, a := range delSucceeded {
 		e.cache.Delete(e.pair.ID, a.Key)
 	}
 
-	totalSucceeded := succeeded + delSucceeded
+	totalSucceeded := succeededCount + delSucceededCount
 	totalFailed := failed + delFailed
 
 	slog.Info("sync complete", "pair", e.pair.Name,

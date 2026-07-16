@@ -139,10 +139,15 @@ func (s *Server) listSyncPairs(c *gin.Context) {
 	for i, p := range pairs {
 		r := enrichPair(s.repo, p)
 		if eng, ok := s.engines[p.ID]; ok {
-			running, _, _, lastError, prog := eng.Status()
+			running, lastRun, status, lastError, prog := eng.Status()
 			r.Running = running
 			r.LastError = lastError
 			r.Progress = &prog
+			// Override stale DB status with engine live status
+			r.LastSyncStatus = status
+			if !lastRun.IsZero() {
+				r.LastSyncAt = &lastRun
+			}
 		}
 		resp[i] = r
 	}
@@ -266,7 +271,12 @@ func (s *Server) syncStatus(c *gin.Context) {
 		"consecutive_errors": p.ConsecutiveErrors,
 	}
 	if eng, ok := s.engines[c.Param("id")]; ok {
-		_, _, _, _, prog := eng.Status()
+		_, lastRun, status, lastError, prog := eng.Status()
+		if !lastRun.IsZero() {
+			resp["last_sync_at"] = lastRun
+		}
+		resp["status"] = status
+		resp["last_error"] = lastError
 		resp["progress"] = prog
 	}
 	respond(c, http.StatusOK, resp)
