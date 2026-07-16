@@ -112,8 +112,27 @@ async function pollStatus() {
                     <div class="stat"><span class="stat-label">Interval</span><span class="stat-value">${p.sync_interval}s</span></div>
                     <div class="stat"><span class="stat-label">Last Sync</span><span class="stat-value">${lastSync}</span></div>
                 </div>
+                <div class="pair-actions">
+                    <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
+                    <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
+                </div>
             `;
             grid.appendChild(card);
+        });
+        grid.querySelectorAll('[data-action="sync"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                btn.disabled = true; btn.textContent = 'Syncing...';
+                try { await fetch('/api/sync-pairs/' + btn.dataset.id + '/sync', { method: 'POST' }); } catch(e) {}
+                pollStatus();
+            });
+        });
+        grid.querySelectorAll('[data-action="delete"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!confirm('Delete this sync pair?')) return;
+                btn.disabled = true; btn.textContent = 'Deleting...';
+                try { await fetch('/api/sync-pairs/' + btn.dataset.id, { method: 'DELETE' }); } catch(e) {}
+                pollStatus();
+            });
         });
     } catch(e) {
         console.error('poll failed', e);

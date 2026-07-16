@@ -149,3 +149,11 @@ body {
 /* Nav brand link */
 .nav-brand a { color: var(--blue); text-decoration: none; }
 
+/* Pair action buttons */
+.pair-actions { display: flex; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--hairline); }
+.btn-sm { padding: 4px 12px; font-size: 12px; }
+.btn-danger { background: var(--red); color: white; }
+.btn-danger:hover { background: #d53b4f; }
+.btn-danger:disabled { background: var(--grey); cursor: not-allowed; opacity: 0.6; }
+.btn-sm:disabled { opacity: 0.6; cursor: not-allowed; }
+
