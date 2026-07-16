@@ -94,6 +94,8 @@ async function pollStatus() {
                 if (p.running) statusClass = 'running';
                 progressHTML = `<div class="sync-progress ${p.running ? 'running' : 'synced'}"><div class="sync-bar" style="width:${pct}%"></div></div>
                     <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${prog.completed}/${prog.total} (${pct}%)</span></div>`;
+            } else if (p.last_error) {
+                progressHTML = `<div class="stat error-detail"><span class="stat-label">Error</span><span class="stat-value">${p.last_error}</span></div>`;
             } else {
                 progressHTML = `<div class="sync-progress ${statusClass}"><div class="sync-bar"></div></div>`;
             }

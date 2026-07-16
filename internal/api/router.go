@@ -17,13 +17,28 @@ import (
 type Server struct {
 	repo        *config.Repository
 	cachePath   string
+	cache       *cache.Store
 	setupStates map[string]*config.SetupState
 	engines     map[string]*sync.Engine
 	rootCtx     context.Context
 }
 
-func NewServer(repo *config.Repository, cachePath string) *Server {
-	return &Server{repo: repo, cachePath: cachePath, setupStates: make(map[string]*config.SetupState), engines: make(map[string]*sync.Engine)}
+func NewServer(repo *config.Repository, cachePath string) (*Server, error) {
+	c, err := cache.Open(cachePath)
+	if err != nil {
+		return nil, fmt.Errorf("open cache: %w", err)
+	}
+	return &Server{
+		repo:        repo,
+		cachePath:   cachePath,
+		cache:       c,
+		setupStates: make(map[string]*config.SetupState),
+		engines:     make(map[string]*sync.Engine),
+	}, nil
+}
+
+func (s *Server) Close() {
+	s.cache.Close()
 }
 
 func (s *Server) SetRootContext(ctx context.Context) {
@@ -53,12 +68,8 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 	if err != nil {
 		return fmt.Errorf("create s3 client for target: %w", err)
 	}
-	cacheStore, err := cache.Open(s.cachePath)
-	if err != nil {
-		return fmt.Errorf("open cache: %w", err)
-	}
 
-	engine := sync.NewEngine(&p, src, tgt, srcS3, tgtS3, cacheStore)
+	engine := sync.NewEngine(&p, src, tgt, srcS3, tgtS3, s.cache)
 	s.RegisterEngine(p.ID, engine)
 
 	ticker := time.NewTicker(time.Duration(p.SyncInterval) * time.Second)
@@ -66,7 +77,6 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 
 	go func() {
 		defer ticker.Stop()
-		defer cacheStore.Close()
 		defer engine.Stop()
 
 		for {
@@ -80,7 +90,7 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 				if err := engine.RunOnce(ctx); err != nil {
 					slog.Error("engine loop: sync failed", "pair", p.Name, "error", err)
 				}
-				_, _, status, _ := engine.Status()
+				_, _, status, _, _ := engine.Status()
 				if pair, err := s.repo.GetSyncPair(p.ID); err == nil {
 					pair.LastSyncStatus = status
 					s.repo.UpdateSyncPair(pair)

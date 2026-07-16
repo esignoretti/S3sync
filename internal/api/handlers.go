@@ -108,6 +108,7 @@ type syncPairResponse struct {
 	TargetURL    string         `json:"target_url"`
 	Progress     *sync.Progress `json:"progress"`
 	Running      bool           `json:"running"`
+	LastError    string         `json:"last_error"`
 }
 
 func enrichPair(repo *config.Repository, p config.SyncPair) syncPairResponse {
@@ -138,8 +139,9 @@ func (s *Server) listSyncPairs(c *gin.Context) {
 	for i, p := range pairs {
 		r := enrichPair(s.repo, p)
 		if eng, ok := s.engines[p.ID]; ok {
-			running, _, _, prog := eng.Status()
+			running, _, _, lastError, prog := eng.Status()
 			r.Running = running
+			r.LastError = lastError
 			r.Progress = &prog
 		}
 		resp[i] = r
@@ -221,7 +223,7 @@ func (s *Server) triggerSync(c *gin.Context) {
 			if err := eng.RunOnce(context.Background()); err != nil {
 				slog.Warn("trigger sync", "pair", pairID, "error", err)
 			}
-			_, _, status, _ := eng.Status()
+			_, _, status, _, _ := eng.Status()
 			pair, err := s.repo.GetSyncPair(pairID)
 			if err == nil {
 				now := time.Now().UTC()
@@ -259,7 +261,7 @@ func (s *Server) syncStatus(c *gin.Context) {
 		"consecutive_errors": p.ConsecutiveErrors,
 	}
 	if eng, ok := s.engines[c.Param("id")]; ok {
-		_, _, _, prog := eng.Status()
+		_, _, _, _, prog := eng.Status()
 		resp["progress"] = prog
 	}
 	respond(c, http.StatusOK, resp)

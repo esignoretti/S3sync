@@ -33,6 +33,7 @@ type Engine struct {
 	running    bool
 	lastRun    time.Time
 	lastStatus string
+	lastError  string
 	progress   *Progress
 	cancel     context.CancelFunc
 
@@ -68,6 +69,14 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.running = true
 	e.mu.Unlock()
 
+	// Reset progress before any work
+	e.mu.Lock()
+	e.progress.Total = 0
+	e.progress.Completed = 0
+	e.progress.Failed = 0
+	e.lastError = ""
+	e.mu.Unlock()
+
 	ctx, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	if e.cancel != nil {
@@ -100,13 +109,13 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 
 	listing, err := e.lister.List(ctx)
 	if err != nil {
-		e.setStatus("error")
+		e.setResult("error", fmt.Sprintf("list: %v", err))
 		return fmt.Errorf("list: %w", err)
 	}
 
 	cached, err := e.cache.List(e.pair.ID)
 	if err != nil {
-		e.setStatus("error")
+		e.setResult("error", fmt.Sprintf("cache: %v", err))
 		return fmt.Errorf("cache: %w", err)
 	}
 
@@ -154,18 +163,19 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		"succeeded", totalSucceeded, "failed", totalFailed)
 
 	if totalFailed > 0 {
-		e.setStatus("error")
+		e.setResult("error", fmt.Sprintf("%d worker(s) failed", totalFailed))
 	} else {
-		e.setStatus("ok")
+		e.setResult("ok", "")
 	}
 	e.lastRun = time.Now()
 
 	return nil
 }
 
-func (e *Engine) setStatus(status string) {
+func (e *Engine) setResult(status, errMsg string) {
 	e.mu.Lock()
 	e.lastStatus = status
+	e.lastError = errMsg
 	e.mu.Unlock()
 }
 
@@ -186,12 +196,12 @@ func (e *Engine) Stop() {
 	e.mu.Unlock()
 }
 
-func (e *Engine) Status() (running bool, lastRun time.Time, status string, progress Progress) {
+func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastError string, progress Progress) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	p := Progress{}
 	if e.progress != nil {
 		p = *e.progress
 	}
-	return e.running, e.lastRun, e.lastStatus, p
+	return e.running, e.lastRun, e.lastStatus, e.lastError, p
 }

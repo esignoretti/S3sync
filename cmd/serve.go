@@ -25,7 +25,11 @@ var serveCmd = &cobra.Command{
 
 		port, _ := cmd.Flags().GetInt("port")
 		cacheDir := filepath.Join(defaultConfigDir(), "cache.db")
-		srv := api.NewServer(repo, cacheDir)
+		srv, err := api.NewServer(repo, cacheDir)
+		if err != nil {
+			return fmt.Errorf("create server: %w", err)
+		}
+		defer srv.Close()
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()

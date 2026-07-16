@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,7 +25,10 @@ func TestAPIHealth(t *testing.T) {
 	defer db.Close()
 
 	repo := config.NewRepository(db)
-	srv := api.NewServer(repo, ":memory:")
+	srv, err := api.NewServer(repo, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	router := srv.Router()
 
 	w := httptest.NewRecorder()
@@ -56,7 +60,10 @@ func TestAPIBucketCRUD(t *testing.T) {
 	defer db.Close()
 
 	repo := config.NewRepository(db)
-	srv := api.NewServer(repo, ":memory:")
+	srv, err := api.NewServer(repo, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	router := srv.Router()
 
 	// Create bucket
@@ -120,7 +127,10 @@ func TestAPISyncPairCRUD(t *testing.T) {
 	defer db.Close()
 
 	repo := config.NewRepository(db)
-	srv := api.NewServer(repo, ":memory:")
+	srv, err := api.NewServer(repo, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	router := srv.Router()
 
 	// Create two buckets first
