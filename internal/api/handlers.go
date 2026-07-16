@@ -96,6 +96,27 @@ func (s *Server) createSyncPair(c *gin.Context) {
 	respond(c, http.StatusCreated, p)
 }
 
+type syncPairResponse struct {
+	config.SyncPair
+	SourceBucket string `json:"source_bucket"`
+	TargetBucket string `json:"target_bucket"`
+	SourceName   string `json:"source_name"`
+	TargetName   string `json:"target_name"`
+}
+
+func enrichPair(repo *config.Repository, p config.SyncPair) syncPairResponse {
+	r := syncPairResponse{SyncPair: p}
+	if src, err := repo.GetBucket(p.SourceBucketID); err == nil {
+		r.SourceBucket = src.BucketName
+		r.SourceName = src.Name
+	}
+	if tgt, err := repo.GetBucket(p.TargetBucketID); err == nil {
+		r.TargetBucket = tgt.BucketName
+		r.TargetName = tgt.Name
+	}
+	return r
+}
+
 func (s *Server) listSyncPairs(c *gin.Context) {
 	pairs, err := s.repo.ListSyncPairs()
 	if err != nil {
@@ -105,7 +126,11 @@ func (s *Server) listSyncPairs(c *gin.Context) {
 	if pairs == nil {
 		pairs = []config.SyncPair{}
 	}
-	respond(c, http.StatusOK, pairs)
+	resp := make([]syncPairResponse, len(pairs))
+	for i, p := range pairs {
+		resp[i] = enrichPair(s.repo, p)
+	}
+	respond(c, http.StatusOK, resp)
 }
 
 func (s *Server) getSyncPair(c *gin.Context) {
