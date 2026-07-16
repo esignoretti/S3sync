@@ -96,8 +96,11 @@ async function pollStatus() {
                     <div class="stat"><span class="stat-label">Source</span><span class="stat-value">${p.source_bucket_id.slice(0,8)}</span></div>
                     <div class="stat"><span class="stat-label">Target</span><span class="stat-value">${p.target_bucket_id.slice(0,8)}</span></div>
                     <div class="stat"><span class="stat-label">Interval</span><span class="stat-value">${p.sync_interval}s</span></div>
+                    <div class="stat"><span class="stat-label">Workers</span><span class="stat-value">${p.worker_count}</span></div>
                     <div class="stat"><span class="stat-label">Last Sync</span><span class="stat-value">${lastSync}</span></div>
+                    <div class="stat"><span class="stat-label">Errors</span><span class="stat-value">${p.consecutive_errors || 0}</span></div>
                 </div>
+                <div class="sync-progress ${statusClass}"><div class="sync-bar"></div></div>
                 <div class="pair-actions">
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
                     <button class="btn btn-sm ${p.enabled ? 'btn-danger' : 'btn-secondary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Stop' : 'Start'}</button>
