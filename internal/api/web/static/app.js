@@ -84,9 +84,19 @@ async function pollStatus() {
         json.data.forEach(p => {
             let card = document.createElement('div');
             card.className = 'pair-card';
-            let status = p.last_sync_status || 'never';
+            let status = p.running ? 'running' : (p.last_sync_status || 'never');
             let statusClass = status === 'ok' ? 'synced' : status === 'error' ? 'error' : status === 'running' ? 'running' : 'idle';
             let lastSync = p.last_sync_at ? new Date(p.last_sync_at).toLocaleString() : '—';
+            let prog = p.progress || {};
+            let pct = prog.total > 0 ? Math.round(prog.completed / prog.total * 100) : 0;
+            let progressHTML = '';
+            if (prog.total > 0) {
+                if (p.running) statusClass = 'running';
+                progressHTML = `<div class="sync-progress ${p.running ? 'running' : 'synced'}"><div class="sync-bar" style="width:${pct}%"></div></div>
+                    <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${prog.completed}/${prog.total} (${pct}%)</span></div>`;
+            } else {
+                progressHTML = `<div class="sync-progress ${statusClass}"><div class="sync-bar"></div></div>`;
+            }
             card.innerHTML = `
                 <div class="pair-header">
                     <span class="status-pill status-${statusClass}">${status}</span>
@@ -99,8 +109,8 @@ async function pollStatus() {
                     <div class="stat"><span class="stat-label">Workers</span><span class="stat-value">${p.worker_count}</span></div>
                     <div class="stat"><span class="stat-label">Last Sync</span><span class="stat-value">${lastSync}</span></div>
                     <div class="stat"><span class="stat-label">Errors</span><span class="stat-value">${p.consecutive_errors || 0}</span></div>
+                    ${progressHTML}
                 </div>
-                <div class="sync-progress ${statusClass}"><div class="sync-bar"></div></div>
                 <div class="pair-actions">
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
                     <button class="btn btn-sm ${p.enabled ? 'btn-danger' : 'btn-secondary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Stop' : 'Start'}</button>
@@ -113,7 +123,7 @@ async function pollStatus() {
             btn.addEventListener('click', async () => {
                 btn.disabled = true; btn.textContent = 'Syncing...';
                 try { await fetch('/api/sync-pairs/' + btn.dataset.id + '/sync', { method: 'POST' }); } catch(e) {}
-                pollStatus();
+                setTimeout(pollStatus, 200); // immediate re-poll
             });
         });
         grid.querySelectorAll('[data-action="delete"]').forEach(btn => {

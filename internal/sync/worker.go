@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,14 +19,17 @@ type WorkerPool struct {
 	targetBucket string
 	throttler    *Throttler
 	storageClass string
+	progress     *Progress
+	mu           sync.Mutex
 }
 
 func NewWorkerPool(workers int, client *s3.Client, source, target string,
-	throttler *Throttler, storageClass string) *WorkerPool {
+	throttler *Throttler, storageClass string, progress *Progress) *WorkerPool {
 	return &WorkerPool{
 		workers: workers, client: client,
 		sourceBucket: source, targetBucket: target,
 		throttler: throttler, storageClass: storageClass,
+		progress: progress,
 	}
 }
 
@@ -66,6 +70,14 @@ func (wp *WorkerPool) Run(ctx context.Context, actions []SyncAction) (int, int) 
 					slog.Info("worker done", "key", a.Key, "action", a.Type, "ms", time.Since(start).Milliseconds())
 				}
 				results <- result{err: err}
+				if wp.progress != nil {
+					wp.mu.Lock()
+					wp.progress.Completed++
+					if err != nil {
+						wp.progress.Failed++
+					}
+					wp.mu.Unlock()
+				}
 			}
 		}()
 	}

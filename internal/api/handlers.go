@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -99,12 +100,14 @@ func (s *Server) createSyncPair(c *gin.Context) {
 
 type syncPairResponse struct {
 	config.SyncPair
-	SourceBucket string `json:"source_bucket"`
-	TargetBucket string `json:"target_bucket"`
-	SourceName   string `json:"source_name"`
-	TargetName   string `json:"target_name"`
-	SourceURL    string `json:"source_url"`
-	TargetURL    string `json:"target_url"`
+	SourceBucket string         `json:"source_bucket"`
+	TargetBucket string         `json:"target_bucket"`
+	SourceName   string         `json:"source_name"`
+	TargetName   string         `json:"target_name"`
+	SourceURL    string         `json:"source_url"`
+	TargetURL    string         `json:"target_url"`
+	Progress     *sync.Progress `json:"progress"`
+	Running      bool           `json:"running"`
 }
 
 func enrichPair(repo *config.Repository, p config.SyncPair) syncPairResponse {
@@ -133,7 +136,13 @@ func (s *Server) listSyncPairs(c *gin.Context) {
 	}
 	resp := make([]syncPairResponse, len(pairs))
 	for i, p := range pairs {
-		resp[i] = enrichPair(s.repo, p)
+		r := enrichPair(s.repo, p)
+		if eng, ok := s.engines[p.ID]; ok {
+			running, _, _, prog := eng.Status()
+			r.Running = running
+			r.Progress = &prog
+		}
+		resp[i] = r
 	}
 	respond(c, http.StatusOK, resp)
 }
@@ -184,9 +193,35 @@ func (s *Server) disableSyncPair(c *gin.Context) {
 }
 
 func (s *Server) triggerSync(c *gin.Context) {
+	pairID := c.Param("id")
+
+	if eng, ok := s.engines[pairID]; ok {
+		eng.SetRunning(true)
+		go func() {
+			if err := eng.RunOnce(context.Background()); err != nil {
+				slog.Warn("trigger sync", "pair", pairID, "error", err)
+			}
+			_, _, status, _ := eng.Status()
+			pair, err := s.repo.GetSyncPair(pairID)
+			if err == nil {
+				now := time.Now().UTC()
+				pair.LastSyncAt = &now
+				pair.LastSyncStatus = status
+				if status == "error" {
+					pair.ConsecutiveErrors++
+				} else {
+					pair.ConsecutiveErrors = 0
+				}
+				s.repo.UpdateSyncPair(pair)
+			}
+		}()
+		respond(c, http.StatusAccepted, gin.H{"message": "sync triggered"})
+		return
+	}
+
 	go func() {
-		if err := sync.RunOneShot(context.Background(), s.repo, c.Param("id"), s.cacheDir); err != nil {
-			slog.Warn("trigger sync", "pair", c.Param("id"), "error", err)
+		if err := sync.RunOneShot(context.Background(), s.repo, pairID, s.cacheDir); err != nil {
+			slog.Warn("trigger sync", "pair", pairID, "error", err)
 		}
 	}()
 	respond(c, http.StatusAccepted, gin.H{"message": "sync triggered"})
@@ -198,11 +233,16 @@ func (s *Server) syncStatus(c *gin.Context) {
 		respondError(c, http.StatusNotFound, err.Error())
 		return
 	}
-	respond(c, http.StatusOK, gin.H{
-		"status":            p.LastSyncStatus,
-		"last_sync_at":      p.LastSyncAt,
+	resp := gin.H{
+		"status":             p.LastSyncStatus,
+		"last_sync_at":       p.LastSyncAt,
 		"consecutive_errors": p.ConsecutiveErrors,
-	})
+	}
+	if eng, ok := s.engines[c.Param("id")]; ok {
+		_, _, _, prog := eng.Status()
+		resp["progress"] = prog
+	}
+	respond(c, http.StatusOK, resp)
 }
 
 func (s *Server) setup(c *gin.Context) {

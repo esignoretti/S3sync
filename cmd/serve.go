@@ -72,6 +72,7 @@ var serveCmd = &cobra.Command{
 				defer cacheStore.Close()
 
 				engine := sync.NewEngine(&p, src, tgt, srcS3, tgtS3, cacheStore)
+				srv.RegisterEngine(p.ID, engine)
 				ticker := time.NewTicker(time.Duration(p.SyncInterval) * time.Second)
 				defer ticker.Stop()
 
@@ -82,7 +83,7 @@ var serveCmd = &cobra.Command{
 						if err := engine.RunOnce(ctx); err != nil {
 							slog.Error("serve: sync cycle failed", "pair", p.Name, "error", err)
 						} else {
-							_, _, status := engine.Status()
+							_, _, status, _ := engine.Status()
 							slog.Info("serve: sync cycle complete", "pair", p.Name, "status", status)
 						}
 					case <-ctx.Done():

@@ -51,6 +51,8 @@ func migrate(db *sql.DB) error {
 			enabled INTEGER NOT NULL DEFAULT 1,
 			last_sync_at TEXT, last_sync_status TEXT NOT NULL DEFAULT '',
 			consecutive_errors INTEGER NOT NULL DEFAULT 0,
+			last_synced_objects INTEGER NOT NULL DEFAULT 0,
+			last_total_objects INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 		);
 	`)

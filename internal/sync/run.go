@@ -49,7 +49,7 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 		return fmt.Errorf("sync: %w", err)
 	}
 
-	_, _, status := engine.Status()
+	_, _, status, _ := engine.Status()
 	now := time.Now().UTC()
 	pair.LastSyncAt = &now
 	pair.LastSyncStatus = status

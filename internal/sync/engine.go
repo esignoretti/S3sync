@@ -12,6 +12,12 @@ import (
 	"github.com/esignoretti/S3sync/internal/config"
 )
 
+type Progress struct {
+	Total     int `json:"total"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+}
+
 type Engine struct {
 	pair      *config.SyncPair
 	src       *config.Bucket
@@ -27,6 +33,7 @@ type Engine struct {
 	running    bool
 	lastRun    time.Time
 	lastStatus string
+	progress   *Progress
 
 	setupOnce sync.Once
 }
@@ -35,6 +42,7 @@ func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
 	srcS3, tgtS3 *s3.Client, cacheStore *cache.Store) *Engine {
 
 	thr := NewThrottler(pair.MaxGetOpsPerMinute)
+	progress := &Progress{}
 	return &Engine{
 		pair:      pair,
 		src:       src,
@@ -45,7 +53,8 @@ func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
 		throttler: thr,
 		lister:    NewLister(srcS3, src.BucketName, thr),
 		pool: NewWorkerPool(pair.WorkerCount, tgtS3,
-			src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass),
+			src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass, progress),
+		progress: progress,
 	}
 }
 
@@ -105,6 +114,12 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		"delete", len(diff.ToDelete),
 		"skipped", diff.Skipped)
 
+	e.mu.Lock()
+	e.progress.Total = len(diff.NewOrChanged) + len(diff.ToDelete)
+	e.progress.Completed = 0
+	e.progress.Failed = 0
+	e.mu.Unlock()
+
 	succeeded, failed := e.pool.Run(ctx, diff.NewOrChanged)
 
 	delSucceeded, delFailed := e.pool.Run(ctx, diff.ToDelete)
@@ -143,8 +158,18 @@ func (e *Engine) setStatus(status string) {
 	e.mu.Unlock()
 }
 
-func (e *Engine) Status() (running bool, lastRun time.Time, status string) {
+func (e *Engine) SetRunning(running bool) {
+	e.mu.Lock()
+	e.running = running
+	e.mu.Unlock()
+}
+
+func (e *Engine) Status() (running bool, lastRun time.Time, status string, progress Progress) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.running, e.lastRun, e.lastStatus
+	p := Progress{}
+	if e.progress != nil {
+		p = *e.progress
+	}
+	return e.running, e.lastRun, e.lastStatus, p
 }

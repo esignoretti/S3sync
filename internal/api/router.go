@@ -5,16 +5,22 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/esignoretti/S3sync/internal/config"
+	"github.com/esignoretti/S3sync/internal/sync"
 )
 
 type Server struct {
 	repo        *config.Repository
 	cacheDir    string
 	setupStates map[string]*config.SetupState
+	engines     map[string]*sync.Engine
 }
 
 func NewServer(repo *config.Repository, cacheDir string) *Server {
-	return &Server{repo: repo, cacheDir: cacheDir, setupStates: make(map[string]*config.SetupState)}
+	return &Server{repo: repo, cacheDir: cacheDir, setupStates: make(map[string]*config.SetupState), engines: make(map[string]*sync.Engine)}
+}
+
+func (s *Server) RegisterEngine(pairID string, e *sync.Engine) {
+	s.engines[pairID] = e
 }
 
 func (s *Server) Router() *gin.Engine {
