@@ -171,7 +171,12 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 }
 
 func (s *Server) deleteSyncPair(c *gin.Context) {
-	if err := s.repo.DeleteSyncPair(c.Param("id")); err != nil {
+	id := c.Param("id")
+	if eng, ok := s.engines[id]; ok {
+		eng.Stop()
+		delete(s.engines, id)
+	}
+	if err := s.repo.DeleteSyncPair(id); err != nil {
 		respondError(c, http.StatusNotFound, err.Error())
 		return
 	}
@@ -186,10 +191,18 @@ func (s *Server) disableSyncPair(c *gin.Context) {
 	}
 	p.Enabled = !p.Enabled
 
-	// If disabling, stop the running engine
-	if !p.Enabled {
+	if p.Enabled {
+		// Start the periodic engine loop if not already running
+		if _, ok := s.engines[p.ID]; !ok {
+			if err := s.StartEngineLoop(s.rootCtx, *p); err != nil {
+				slog.Error("disableSyncPair: start engine loop", "pair", p.ID, "error", err)
+			}
+		}
+	} else {
+		// Stop the running engine
 		if eng, ok := s.engines[p.ID]; ok {
 			eng.Stop()
+			delete(s.engines, p.ID)
 		}
 	}
 
@@ -227,7 +240,7 @@ func (s *Server) triggerSync(c *gin.Context) {
 	}
 
 	go func() {
-		if err := sync.RunOneShot(context.Background(), s.repo, pairID, s.cacheDir); err != nil {
+		if err := sync.RunOneShot(context.Background(), s.repo, pairID, s.cachePath); err != nil {
 			slog.Warn("trigger sync", "pair", pairID, "error", err)
 		}
 	}()

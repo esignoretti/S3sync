@@ -1,26 +1,98 @@
 package api
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/esignoretti/S3sync/internal/cache"
 	"github.com/esignoretti/S3sync/internal/config"
+	"github.com/esignoretti/S3sync/internal/s3client"
 	"github.com/esignoretti/S3sync/internal/sync"
 )
 
 type Server struct {
 	repo        *config.Repository
-	cacheDir    string
+	cachePath   string
 	setupStates map[string]*config.SetupState
 	engines     map[string]*sync.Engine
+	rootCtx     context.Context
 }
 
-func NewServer(repo *config.Repository, cacheDir string) *Server {
-	return &Server{repo: repo, cacheDir: cacheDir, setupStates: make(map[string]*config.SetupState), engines: make(map[string]*sync.Engine)}
+func NewServer(repo *config.Repository, cachePath string) *Server {
+	return &Server{repo: repo, cachePath: cachePath, setupStates: make(map[string]*config.SetupState), engines: make(map[string]*sync.Engine)}
+}
+
+func (s *Server) SetRootContext(ctx context.Context) {
+	s.rootCtx = ctx
 }
 
 func (s *Server) RegisterEngine(pairID string, e *sync.Engine) {
 	s.engines[pairID] = e
+}
+
+// StartEngineLoop creates an engine for the given pair and runs its
+// periodic-sync loop until the pair is disabled or ctx is cancelled.
+func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
+	src, err := s.repo.GetBucket(p.SourceBucketID)
+	if err != nil {
+		return fmt.Errorf("get source bucket: %w", err)
+	}
+	tgt, err := s.repo.GetBucket(p.TargetBucketID)
+	if err != nil {
+		return fmt.Errorf("get target bucket: %w", err)
+	}
+	srcS3, err := s3client.NewClient(src)
+	if err != nil {
+		return fmt.Errorf("create s3 client for source: %w", err)
+	}
+	tgtS3, err := s3client.NewClient(tgt)
+	if err != nil {
+		return fmt.Errorf("create s3 client for target: %w", err)
+	}
+	cacheStore, err := cache.Open(s.cachePath)
+	if err != nil {
+		return fmt.Errorf("open cache: %w", err)
+	}
+
+	engine := sync.NewEngine(&p, src, tgt, srcS3, tgtS3, cacheStore)
+	s.RegisterEngine(p.ID, engine)
+
+	ticker := time.NewTicker(time.Duration(p.SyncInterval) * time.Second)
+	slog.Info("engine loop started", "pair", p.Name, "interval", p.SyncInterval)
+
+	go func() {
+		defer ticker.Stop()
+		defer cacheStore.Close()
+		defer engine.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				currentPair, err := s.repo.GetSyncPair(p.ID)
+				if err != nil || !currentPair.Enabled {
+					slog.Info("engine loop: pair disabled", "pair", p.Name)
+					return
+				}
+				if err := engine.RunOnce(ctx); err != nil {
+					slog.Error("engine loop: sync failed", "pair", p.Name, "error", err)
+				}
+				_, _, status, _ := engine.Status()
+				if pair, err := s.repo.GetSyncPair(p.ID); err == nil {
+					pair.LastSyncStatus = status
+					s.repo.UpdateSyncPair(pair)
+				}
+			case <-ctx.Done():
+				slog.Info("engine loop: shutting down", "pair", p.Name)
+				return
+			}
+		}
+	}()
+
+	return nil
 }
 
 func (s *Server) Router() *gin.Engine {
