@@ -159,13 +159,27 @@ func (s *Server) getSyncPair(c *gin.Context) {
 }
 
 func (s *Server) updateSyncPair(c *gin.Context) {
-	var p config.SyncPair
-	if err := c.ShouldBindJSON(&p); err != nil {
+	id := c.Param("id")
+	var in struct {
+		SyncInterval *int `json:"sync_interval"`
+		WorkerCount  *int `json:"worker_count"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	p.ID = c.Param("id")
-	if err := s.repo.UpdateSyncPair(&p); err != nil {
+	p, err := s.repo.GetSyncPair(id)
+	if err != nil {
+		respondError(c, http.StatusNotFound, err.Error())
+		return
+	}
+	if in.SyncInterval != nil {
+		p.SyncInterval = *in.SyncInterval
+	}
+	if in.WorkerCount != nil {
+		p.WorkerCount = *in.WorkerCount
+	}
+	if err := s.repo.UpdateSyncPair(p); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}

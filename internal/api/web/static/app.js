@@ -84,6 +84,7 @@ async function pollStatus() {
         json.data.forEach(p => {
             let card = document.createElement('div');
             card.className = 'pair-card';
+            card.dataset.pairId = p.id;
             let status = p.running ? 'running' : (p.last_sync_status || 'never');
             let statusClass = status === 'ok' ? 'synced' : status === 'error' ? 'error' : status === 'running' ? 'running' : 'idle';
             let lastSync = p.last_sync_at ? new Date(p.last_sync_at).toLocaleString() : '—';
@@ -107,8 +108,8 @@ async function pollStatus() {
                 <div class="pair-stats">
                     <div class="stat"><span class="stat-label">Source</span><span class="stat-value">${p.source_url || p.source_name || p.source_bucket_id.slice(0,8)}</span></div>
                     <div class="stat"><span class="stat-label">Target</span><span class="stat-value">${p.target_url || p.target_name || p.target_bucket_id.slice(0,8)}</span></div>
-                    <div class="stat"><span class="stat-label">Interval</span><span class="stat-value">${p.sync_interval}s</span></div>
-                    <div class="stat"><span class="stat-label">Workers</span><span class="stat-value">${p.worker_count}</span></div>
+                    <div class="stat"><span class="stat-label">Interval</span><span class="stat-value" data-field="sync_interval">${p.sync_interval}s</span></div>
+                    <div class="stat"><span class="stat-label">Workers</span><span class="stat-value" data-field="worker_count">${p.worker_count}</span></div>
                     <div class="stat"><span class="stat-label">Last Sync</span><span class="stat-value">${lastSync}</span></div>
                     <div class="stat"><span class="stat-label">Errors</span><span class="stat-value">${p.consecutive_errors || 0}</span></div>
                     ${progressHTML}
@@ -116,6 +117,7 @@ async function pollStatus() {
                 <div class="pair-actions">
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
                     <button class="btn btn-sm ${p.enabled ? 'btn-danger' : 'btn-secondary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Stop' : 'Start'}</button>
+                    <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${p.id}">Edit</button>
                     <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
                 </div>
             `;
@@ -143,9 +145,42 @@ async function pollStatus() {
                 pollStatus();
             });
         });
+        grid.querySelectorAll('[data-action="edit"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                openEditModal(btn.dataset.id);
+            });
+        });
     } catch(e) {
         console.error('poll failed', e);
     }
+}
+
+let editPairId = null;
+function openEditModal(pairId) {
+    editPairId = pairId;
+    document.getElementById('edit-interval').value = '';
+    document.getElementById('edit-workers').value = '';
+    document.getElementById('edit-modal').style.display = 'flex';
+}
+function closeEditModal() {
+    document.getElementById('edit-modal').style.display = 'none';
+    editPairId = null;
+}
+async function saveEdit() {
+    let interval = parseInt(document.getElementById('edit-interval').value);
+    let workers = parseInt(document.getElementById('edit-workers').value);
+    let body = {};
+    if (!isNaN(interval)) body.sync_interval = interval;
+    if (!isNaN(workers)) body.worker_count = workers;
+    try {
+        await fetch('/api/sync-pairs/' + editPairId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+    } catch(e) {}
+    closeEditModal();
+    pollStatus();
 }
 
 document.addEventListener('DOMContentLoaded', () => {

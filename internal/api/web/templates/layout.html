@@ -19,6 +19,23 @@
     <main class="main">
         {{block "content" .}}<p>empty</p>{{end}}
     </main>
+
+    <div id="edit-modal" class="modal-overlay" style="display:none">
+        <div class="modal">
+            <h3>Edit Sync Pair</h3>
+            <label>Sync Interval (s)
+                <input type="number" id="edit-interval" min="10" step="10">
+            </label>
+            <label>Worker Count
+                <input type="number" id="edit-workers" min="1" max="100">
+            </label>
+            <div class="modal-actions">
+                <button class="btn btn-sm btn-secondary" onclick="closeEditModal()">Cancel</button>
+                <button class="btn btn-sm btn-primary" onclick="saveEdit()">Save</button>
+            </div>
+        </div>
+    </div>
+
     <script defer src="/static/app.js"></script>
 </body>
 </html>
