@@ -79,6 +79,14 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 		defer ticker.Stop()
 		defer engine.Stop()
 
+		// Run once immediately on start
+		engine.RunOnce(ctx)
+		_, _, status, _, _ := engine.Status()
+		if pair, err := s.repo.GetSyncPair(p.ID); err == nil {
+			pair.LastSyncStatus = status
+			s.repo.UpdateSyncPair(pair)
+		}
+
 		for {
 			select {
 			case <-ticker.C:
