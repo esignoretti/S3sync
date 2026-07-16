@@ -185,6 +185,14 @@ func (s *Server) disableSyncPair(c *gin.Context) {
 		return
 	}
 	p.Enabled = !p.Enabled
+
+	// If disabling, stop the running engine
+	if !p.Enabled {
+		if eng, ok := s.engines[p.ID]; ok {
+			eng.Stop()
+		}
+	}
+
 	if err := s.repo.UpdateSyncPair(p); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
@@ -196,7 +204,6 @@ func (s *Server) triggerSync(c *gin.Context) {
 	pairID := c.Param("id")
 
 	if eng, ok := s.engines[pairID]; ok {
-		eng.SetRunning(true)
 		go func() {
 			if err := eng.RunOnce(context.Background()); err != nil {
 				slog.Warn("trigger sync", "pair", pairID, "error", err)

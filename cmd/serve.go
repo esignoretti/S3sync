@@ -39,6 +39,11 @@ var serveCmd = &cobra.Command{
 		}
 
 		for _, p := range pairs {
+			// Reset stale running status from previous session
+			if p.LastSyncStatus == "running" {
+				p.LastSyncStatus = ""
+				repo.UpdateSyncPair(&p)
+			}
 			if !p.Enabled {
 				continue
 			}
@@ -80,14 +85,23 @@ var serveCmd = &cobra.Command{
 				for {
 					select {
 					case <-ticker.C:
+						currentPair, err := repo.GetSyncPair(p.ID)
+						if err != nil || !currentPair.Enabled {
+							slog.Info("serve: sync pair disabled", "pair", p.Name)
+							engine.Stop()
+							return
+						}
 						if err := engine.RunOnce(ctx); err != nil {
 							slog.Error("serve: sync cycle failed", "pair", p.Name, "error", err)
-						} else {
-							_, _, status, _ := engine.Status()
-							slog.Info("serve: sync cycle complete", "pair", p.Name, "status", status)
+						}
+						_, _, status, _ := engine.Status()
+						if pair, err := repo.GetSyncPair(p.ID); err == nil {
+							pair.LastSyncStatus = status
+							repo.UpdateSyncPair(pair)
 						}
 					case <-ctx.Done():
 						slog.Info("serve: stopping sync engine", "pair", p.Name)
+						engine.Stop()
 						return
 					}
 				}

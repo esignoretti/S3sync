@@ -34,6 +34,7 @@ type Engine struct {
 	lastRun    time.Time
 	lastStatus string
 	progress   *Progress
+	cancel     context.CancelFunc
 
 	setupOnce sync.Once
 }
@@ -67,10 +68,20 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.running = true
 	e.mu.Unlock()
 
+	ctx, cancel := context.WithCancel(ctx)
+	e.mu.Lock()
+	if e.cancel != nil {
+		e.cancel()
+	}
+	e.cancel = cancel
+	e.mu.Unlock()
+
 	defer func() {
 		e.mu.Lock()
 		e.running = false
+		e.cancel = nil
 		e.mu.Unlock()
+		cancel()
 	}()
 
 	slog.Info("sync start", "pair", e.pair.Name)
@@ -161,6 +172,17 @@ func (e *Engine) setStatus(status string) {
 func (e *Engine) SetRunning(running bool) {
 	e.mu.Lock()
 	e.running = running
+	e.mu.Unlock()
+}
+
+func (e *Engine) Stop() {
+	e.mu.Lock()
+	if e.cancel != nil {
+		e.cancel()
+		e.cancel = nil
+	}
+	e.running = false
+	e.lastStatus = "stopped"
 	e.mu.Unlock()
 }
 
