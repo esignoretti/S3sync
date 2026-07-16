@@ -17,27 +17,17 @@ type ListedObject struct {
 	LastModified time.Time
 }
 
-type Lister struct {
-	client    *s3.Client
-	bucket    string
-	throttler *Throttler
-}
-
-func NewLister(client *s3.Client, bucket string, throttler *Throttler) *Lister {
-	return &Lister{client: client, bucket: bucket, throttler: throttler}
-}
-
-func (l *Lister) List(ctx context.Context) ([]ListedObject, error) {
+func ListObjects(ctx context.Context, client *s3.Client, bucket string, throttler *Throttler) ([]ListedObject, error) {
 	var objects []ListedObject
 	var token *string
 
 	for {
-		if err := l.throttler.WaitLog(ctx, l.bucket); err != nil {
+		if err := throttler.WaitLog(ctx, bucket); err != nil {
 			return nil, fmt.Errorf("throttle: %w", err)
 		}
 
-		out, err := l.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket:            &l.bucket,
+		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            &bucket,
 			MaxKeys:           aws.Int32(1000),
 			ContinuationToken: token,
 		})
@@ -54,7 +44,7 @@ func (l *Lister) List(ctx context.Context) ([]ListedObject, error) {
 			})
 		}
 
-		slog.Debug("listed page", "bucket", l.bucket,
+		slog.Debug("listed page", "bucket", bucket,
 			"page_size", len(out.Contents), "total", len(objects))
 
 		if !aws.ToBool(out.IsTruncated) {

@@ -26,7 +26,6 @@ type Engine struct {
 	tgtS3     *s3.Client
 	cache     *cache.Store
 	throttler *Throttler
-	lister    *Lister
 	pool      *WorkerPool
 
 	mu         sync.Mutex
@@ -53,7 +52,6 @@ func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
 		tgtS3:     tgtS3,
 		cache:     cacheStore,
 		throttler: thr,
-		lister:    NewLister(srcS3, src.BucketName, thr),
 		pool: NewWorkerPool(pair.WorkerCount, tgtS3,
 			src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass, progress),
 		progress: progress,
@@ -96,18 +94,12 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	slog.Info("sync start", "pair", e.pair.Name)
 
 	e.setupOnce.Do(func() {
-		if err := SetupTargetBucket(ctx, e.tgtS3, e.src.Region, TargetConfig{
-			BucketName:    e.tgt.BucketName,
-			Versioning:    e.tgt.Versioning,
-			ObjectLock:    e.tgt.ObjectLock,
-			RetentionMode: e.tgt.RetentionMode,
-			RetentionDays: e.tgt.RetentionDays,
-		}); err != nil {
+		if err := SetupTargetBucket(ctx, e.tgtS3, e.src.Region, e.tgt); err != nil {
 			slog.Warn("target bucket setup", "pair", e.pair.Name, "error", err)
 		}
 	})
 
-	listing, err := e.lister.List(ctx)
+	listing, err := ListObjects(ctx, e.srcS3, e.src.BucketName, e.throttler)
 	if err != nil {
 		e.setResult("error", fmt.Sprintf("list: %v", err))
 		return fmt.Errorf("list: %w", err)

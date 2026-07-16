@@ -142,7 +142,13 @@ func (s *Server) runPairSync(ctx context.Context, pairID string) error {
 
 // StartEngineLoop creates an engine for the given pair and runs its
 // periodic-sync loop until the pair is disabled or ctx is cancelled.
+// Returns nil if an engine loop is already running for this pair.
 func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
+	if s.HasEngine(p.ID) {
+		slog.Debug("engine loop already running", "pair", p.Name)
+		return nil
+	}
+
 	engine, err := s.createEngine(p.ID)
 	if err != nil {
 		return fmt.Errorf("create engine: %w", err)
@@ -154,6 +160,7 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 	go func() {
 		defer ticker.Stop()
 		defer engine.Stop()
+		defer s.DeleteEngine(p.ID)
 
 		// Run once immediately on start
 		engine.RunOnce(ctx)

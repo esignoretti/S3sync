@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -242,7 +241,7 @@ func (s *Server) triggerSync(c *gin.Context) {
 	pairID := c.Param("id")
 
 	go func() {
-		if err := s.runPairSync(context.Background(), pairID); err != nil {
+		if err := s.runPairSync(s.rootCtx, pairID); err != nil {
 			slog.Warn("trigger sync", "pair", pairID, "error", err)
 		}
 		if eng, ok := s.GetEngine(pairID); ok {
