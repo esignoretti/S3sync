@@ -6,18 +6,9 @@ function setupWizard() {
         sourceName: '',
         targetName: '',
         pairName: '',
-        f: {
-            name: '', endpoint: 'https://s3.amazonaws.com', region: 'us-east-1',
-            bucket_name: '', access_key: '', secret_key: '',
-            versioning: false, object_lock: false,
-            retention_mode: 'GOVERNANCE', retention_days: 365,
-            pair_name: '', sync_interval: 300, worker_count: 10,
-            max_get_ops_per_minute: 600, delete_propagation: true,
-            target_storage_class: '',
-        },
+        f: defaultForm(),
         async submit(role) {
             this.error = '';
-            let path = role === 'source' ? '/api/setup' : '/api/setup';
             let headers = { 'Content-Type': 'application/json' };
             if (this.session) headers['X-Setup-Session'] = this.session;
 
@@ -46,19 +37,33 @@ function setupWizard() {
             }
 
             try {
-                let res = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
+                let res = await fetch('/api/setup', { method: 'POST', headers, body: JSON.stringify(body) });
                 let json = await res.json();
                 if (!res.ok) {
                     this.error = json.error || 'Request failed';
                     return;
                 }
-                this.session = json.session;
-                this.step = json.step_num;
-                if (json.done) this.step = 4;
+                let d = json.data || json;
+                this.session = d.session;
+                this.step = d.step_num;
+                if (d.step_num === 2) this.f = defaultForm();
+                if (d.done) this.step = 4;
             } catch(e) {
                 this.error = 'Network error';
             }
         }
+    };
+}
+
+function defaultForm() {
+    return {
+        name: '', endpoint: 'https://s3.amazonaws.com', region: 'us-east-1',
+        bucket_name: '', access_key: '', secret_key: '',
+        versioning: false, object_lock: false,
+        retention_mode: 'GOVERNANCE', retention_days: 365,
+        pair_name: '', sync_interval: 300, worker_count: 10,
+        max_get_ops_per_minute: 600, delete_propagation: true,
+        target_storage_class: '',
     };
 }
 
