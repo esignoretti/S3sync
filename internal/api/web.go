@@ -15,12 +15,15 @@ var templateFS embed.FS
 var staticFS embed.FS
 
 var (
-	webTemplates *template.Template
-	webStatic    fs.FS
+	dashboardTmpl *template.Template
+	setupTmpl     *template.Template
+	webStatic     fs.FS
 )
 
 func init() {
-	webTemplates = template.Must(template.ParseFS(templateFS, "web/templates/*.html"))
+	raw := template.Must(template.ParseFS(templateFS, "web/templates/layout.html"))
+	dashboardTmpl = template.Must(template.Must(raw.Clone()).ParseFS(templateFS, "web/templates/dashboard.html"))
+	setupTmpl = template.Must(template.Must(raw.Clone()).ParseFS(templateFS, "web/templates/setup.html"))
 	staticSub, err := fs.Sub(staticFS, "web/static")
 	if err != nil {
 		panic(err)
@@ -29,15 +32,9 @@ func init() {
 }
 
 func (s *Server) serveDashboard(c *gin.Context) {
-	webTemplates.ExecuteTemplate(c.Writer, "layout.html", gin.H{
-		"title": "S3sync — Dashboard",
-		"page":  "dashboard",
-	})
+	dashboardTmpl.ExecuteTemplate(c.Writer, "layout.html", gin.H{"title": "S3sync — Dashboard"})
 }
 
 func (s *Server) serveSetup(c *gin.Context) {
-	webTemplates.ExecuteTemplate(c.Writer, "layout.html", gin.H{
-		"title": "S3sync — Setup",
-		"page":  "setup",
-	})
+	setupTmpl.ExecuteTemplate(c.Writer, "layout.html", gin.H{"title": "S3sync — Setup"})
 }

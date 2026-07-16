@@ -1,11 +1,8 @@
-function setupWizard() {
-    return {
+document.addEventListener('alpine:init', () => {
+    Alpine.data('setupWizard', () => ({
         step: 1,
         session: null,
         error: '',
-        sourceName: '',
-        targetName: '',
-        pairName: '',
         f: defaultForm(),
         async submit(role) {
             this.error = '';
@@ -52,8 +49,8 @@ function setupWizard() {
                 this.error = 'Network error';
             }
         }
-    };
-}
+    }));
+});
 
 function defaultForm() {
     return {
