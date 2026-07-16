@@ -29,9 +29,23 @@ type SyncPair struct {
 	DeletePropagation  bool       `json:"delete_propagation"`
 	TargetStorageClass string     `json:"target_storage_class,omitempty"`
 	Enabled            bool       `json:"enabled"`
+	DryRun             bool       `json:"dry_run"`
+	WebhookURL         string     `json:"webhook_url,omitempty"`
+	WebhookEvents      string     `json:"webhook_events,omitempty"`
 	LastSyncAt         *time.Time `json:"last_sync_at,omitempty"`
 	LastSyncStatus     string     `json:"last_sync_status"`
 	ConsecutiveErrors  int        `json:"consecutive_errors"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+type SyncLogEntry struct {
+	ID          string    `json:"id"`
+	PairID      string    `json:"pair_id"`
+	Status      string    `json:"status"`
+	ErrorMsg    string    `json:"error_msg,omitempty"`
+	Succeeded   int       `json:"succeeded"`
+	Failed      int       `json:"failed"`
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at"`
 }

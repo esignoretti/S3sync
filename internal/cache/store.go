@@ -78,9 +78,65 @@ func (s *Store) List(pairID string) ([]CachedObject, error) {
 func (s *Store) Clear(pairID string) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		if err := tx.DeleteBucket(s.bucket(pairID)); err != nil {
-			return nil // bucket didn't exist
+			return nil
 		}
 		_, err := tx.CreateBucket(s.bucket(pairID))
 		return err
 	})
+}
+
+type CacheCursor struct {
+	tx  *bbolt.Tx
+	c   *bbolt.Cursor
+	obj CachedObject
+	key string
+	err error
+}
+
+func (s *Store) NewCursor(pairID string) (*CacheCursor, func(), error) {
+	tx, err := s.db.Begin(false)
+	if err != nil {
+		return nil, nil, err
+	}
+	close := func() { tx.Rollback() }
+
+	b := tx.Bucket(s.bucket(pairID))
+	if b == nil {
+		return &CacheCursor{tx: tx}, close, nil
+	}
+
+	return &CacheCursor{tx: tx, c: b.Cursor()}, close, nil
+}
+
+// Next advances the cursor and loads the next cached object.
+// Returns false when exhausted. After Next returns true,
+// Key() and Object() return the current item's data.
+func (c *CacheCursor) Next() bool {
+	var k, v []byte
+	if c.c == nil {
+		return false
+	}
+	if c.key == "" {
+		k, v = c.c.First()
+	} else {
+		k, v = c.c.Next()
+	}
+	if k == nil {
+		return false
+	}
+	c.key = string(k)
+	c.err = json.Unmarshal(v, &c.obj)
+	return c.err == nil
+}
+
+func (c *CacheCursor) Key() string {
+	return c.key
+}
+
+func (c *CacheCursor) Object() CachedObject {
+	return c.obj
+}
+
+func (c *CacheCursor) Err() error {
+	return c.err
 }

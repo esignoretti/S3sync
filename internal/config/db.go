@@ -49,11 +49,18 @@ func migrate(db *sql.DB) error {
 			delete_propagation INTEGER NOT NULL DEFAULT 1,
 			target_storage_class TEXT,
 			enabled INTEGER NOT NULL DEFAULT 1,
+			dry_run INTEGER NOT NULL DEFAULT 0,
+			webhook_url TEXT NOT NULL DEFAULT '',
+			webhook_events TEXT NOT NULL DEFAULT 'error',
 			last_sync_at TEXT, last_sync_status TEXT NOT NULL DEFAULT '',
 			consecutive_errors INTEGER NOT NULL DEFAULT 0,
-			last_synced_objects INTEGER NOT NULL DEFAULT 0,
-			last_total_objects INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS sync_logs (
+			id TEXT PRIMARY KEY, pair_id TEXT NOT NULL REFERENCES sync_pairs(id),
+			status TEXT NOT NULL, error_msg TEXT NOT NULL DEFAULT '',
+			succeeded INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT NOT NULL, completed_at TEXT NOT NULL
 		);
 	`)
 	return err

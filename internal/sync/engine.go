@@ -24,7 +24,7 @@ type Engine struct {
 	tgt       *config.Bucket
 	srcS3     *s3.Client
 	tgtS3     *s3.Client
-	cache     *cache.Store
+	store     *cache.Store
 	throttler *Throttler
 	pool      *WorkerPool
 
@@ -50,7 +50,7 @@ func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
 		tgt:       tgt,
 		srcS3:     srcS3,
 		tgtS3:     tgtS3,
-		cache:     cacheStore,
+		store:     cacheStore,
 		throttler: thr,
 		pool: NewWorkerPool(pair.WorkerCount, tgtS3,
 			src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass, progress),
@@ -67,7 +67,6 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.running = true
 	e.mu.Unlock()
 
-	// Reset progress before any work
 	e.mu.Lock()
 	e.progress.Total = 0
 	e.progress.Completed = 0
@@ -92,6 +91,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}()
 
 	slog.Info("sync start", "pair", e.pair.Name)
+	startTime := time.Now()
 
 	e.setupOnce.Do(func() {
 		if err := SetupTargetBucket(ctx, e.tgtS3, e.src.Region, e.tgt); err != nil {
@@ -99,59 +99,115 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		}
 	})
 
-	listing, err := ListObjects(ctx, e.srcS3, e.src.BucketName, e.throttler)
+	cacheCur, closeCur, err := e.store.NewCursor(e.pair.ID)
 	if err != nil {
-		e.setResult("error", fmt.Sprintf("list: %v", err))
-		return fmt.Errorf("list: %w", err)
+		e.setResult("error", fmt.Sprintf("cache cursor: %v", err))
+		return fmt.Errorf("cache cursor: %w", err)
+	}
+	defer closeCur()
+
+	actions := make(chan SyncAction, 10000)
+	diffErrCh := make(chan error, 1)
+
+	listPage := func(ctx context.Context, token *string) (*s3.ListObjectsV2Output, error) {
+		if err := e.throttler.WaitLog(ctx, e.src.BucketName); err != nil {
+			return nil, err
+		}
+		return e.srcS3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            &e.src.BucketName,
+			MaxKeys:           ptr[int32](1000),
+			ContinuationToken: token,
+		})
 	}
 
-	cached, err := e.cache.List(e.pair.ID)
-	if err != nil {
-		e.setResult("error", fmt.Sprintf("cache: %v", err))
-		return fmt.Errorf("cache: %w", err)
+	go func() {
+		err := StreamingDiff(ctx, listPage, cacheCur, e.pair.DeletePropagation, actions)
+		diffErrCh <- err
+	}()
+
+	var succeeded []SyncAction
+	var succeededCount, failed int
+
+	if e.pair.DryRun {
+		for a := range actions {
+			slog.Info("dry-run", "action", a.Type, "key", a.Key)
+			succeeded = append(succeeded, a)
+			succeededCount++
+			e.mu.Lock()
+			e.progress.Completed++
+			e.mu.Unlock()
+		}
+	} else {
+		type poolResult struct {
+			succeeded []SyncAction
+			count     int
+			failed    int
+		}
+		poolCh := make(chan poolResult, 1)
+		go func() {
+			s, c, f := e.pool.Run(ctx, actions)
+			poolCh <- poolResult{s, c, f}
+		}()
+		r := <-poolCh
+		succeeded, succeededCount, failed = r.succeeded, r.count, r.failed
 	}
 
-	diff := Diff(listing, cached, e.pair.DeletePropagation)
-	slog.Info("diff complete", "pair", e.pair.Name,
-		"new_changed", len(diff.NewOrChanged),
-		"delete", len(diff.ToDelete),
-		"skipped", diff.Skipped)
-
-	e.mu.Lock()
-	e.progress.Total = len(diff.NewOrChanged) + len(diff.ToDelete)
-	e.progress.Completed = 0
-	e.progress.Failed = 0
-	e.mu.Unlock()
-
-	succeeded, succeededCount, failed := e.pool.Run(ctx, diff.NewOrChanged)
-
-	delSucceeded, delSucceededCount, delFailed := e.pool.Run(ctx, diff.ToDelete)
+	diffErr := <-diffErrCh
+	if diffErr != nil {
+		slog.Error("diff failed", "pair", e.pair.Name, "error", diffErr)
+		e.setResult("error", fmt.Sprintf("diff: %v", diffErr))
+		return diffErr
+	}
 
 	now := time.Now().UTC()
 	for _, a := range succeeded {
-		e.cache.Put(&cache.CachedObject{
+		e.store.Put(&cache.CachedObject{
 			PairID: e.pair.ID, Key: a.Key,
 			ETag: a.ETag, Size: a.Size,
 			LastModified: a.LastModified, SyncedAt: now,
 		})
 	}
-	// Remove from cache items that were successfully deleted
-	for _, a := range delSucceeded {
-		e.cache.Delete(e.pair.ID, a.Key)
-	}
 
-	totalSucceeded := succeededCount + delSucceededCount
-	totalFailed := failed + delFailed
+	totalSucceeded := succeededCount
+	totalFailed := failed
+	totalActions := totalSucceeded + totalFailed
 
 	slog.Info("sync complete", "pair", e.pair.Name,
 		"succeeded", totalSucceeded, "failed", totalFailed)
 
+	e.mu.Lock()
+	e.progress.Total = totalActions
+	e.mu.Unlock()
+
+	status := "ok"
+	lastErr := ""
 	if totalFailed > 0 {
-		e.setResult("error", fmt.Sprintf("%d worker(s) failed", totalFailed))
-	} else {
-		e.setResult("ok", "")
+		status = "error"
+		lastErr = fmt.Sprintf("%d worker(s) failed", totalFailed)
 	}
+	e.setResult(status, lastErr)
 	e.lastRun = time.Now()
+
+	// Fire webhook (async)
+	if e.pair.WebhookURL != "" {
+		go func() {
+			p := WebhookPayload{
+				Event:            "sync_completed",
+				PairID:           e.pair.ID,
+				PairName:         e.pair.Name,
+				Status:           status,
+				ConsecutiveErrors: e.pair.ConsecutiveErrors,
+				LastError:        lastErr,
+				Succeeded:        totalSucceeded,
+				Failed:           totalFailed,
+				StartedAt:        startTime.UTC().Format(time.RFC3339),
+				CompletedAt:      now.Format(time.RFC3339),
+				Source:           e.src.BucketName,
+				Target:           e.tgt.BucketName,
+			}
+			SendWebhook(e.pair.WebhookURL, e.pair.WebhookEvents, p)
+		}()
+	}
 
 	return nil
 }
@@ -182,4 +238,8 @@ func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastE
 		p = *e.progress
 	}
 	return e.running, e.lastRun, e.lastStatus, e.lastError, p
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }

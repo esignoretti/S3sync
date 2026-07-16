@@ -148,12 +148,13 @@ func (r *Repository) CreateSyncPair(p *SyncPair) error {
 	_, err := r.db.Exec(
 		`INSERT INTO sync_pairs (id,name,source_bucket_id,target_bucket_id,
 		 sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,
-		 target_storage_class,enabled,last_sync_at,last_sync_status,
-		 consecutive_errors,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 target_storage_class,enabled,dry_run,webhook_url,webhook_events,
+		 last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.SourceBucketID, p.TargetBucketID,
 		p.SyncInterval, p.WorkerCount, p.MaxGetOpsPerMinute, boolInt(p.DeletePropagation),
-		nullStr(p.TargetStorageClass), boolInt(p.Enabled),
+		nullStr(p.TargetStorageClass), boolInt(p.Enabled), boolInt(p.DryRun),
+		p.WebhookURL, p.WebhookEvents,
 		nullTimeRFC(p.LastSyncAt), p.LastSyncStatus,
 		p.ConsecutiveErrors, rfc(p.CreatedAt), rfc(p.UpdatedAt),
 	)
@@ -161,7 +162,7 @@ func (r *Repository) CreateSyncPair(p *SyncPair) error {
 }
 
 func (r *Repository) ListSyncPairs() ([]SyncPair, error) {
-	rows, err := r.db.Query(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs ORDER BY name`)
+	rows, err := r.db.Query(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +171,7 @@ func (r *Repository) ListSyncPairs() ([]SyncPair, error) {
 }
 
 func (r *Repository) GetSyncPair(id string) (*SyncPair, error) {
-	row := r.db.QueryRow(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs WHERE id = ?`, id)
+	row := r.db.QueryRow(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs WHERE id = ?`, id)
 	return scanSyncPair(row)
 }
 
@@ -179,11 +180,12 @@ func (r *Repository) UpdateSyncPair(p *SyncPair) error {
 	res, err := r.db.Exec(
 		`UPDATE sync_pairs SET name=?,source_bucket_id=?,target_bucket_id=?,
 		 sync_interval=?,worker_count=?,max_get_ops_per_minute=?,delete_propagation=?,
-		 target_storage_class=?,enabled=?,last_sync_at=?,last_sync_status=?,
-		 consecutive_errors=?,updated_at=? WHERE id=?`,
+		 target_storage_class=?,enabled=?,dry_run=?,webhook_url=?,webhook_events=?,
+		 last_sync_at=?,last_sync_status=?,consecutive_errors=?,updated_at=? WHERE id=?`,
 		p.Name, p.SourceBucketID, p.TargetBucketID,
 		p.SyncInterval, p.WorkerCount, p.MaxGetOpsPerMinute, boolInt(p.DeletePropagation),
-		nullStr(p.TargetStorageClass), boolInt(p.Enabled),
+		nullStr(p.TargetStorageClass), boolInt(p.Enabled), boolInt(p.DryRun),
+		p.WebhookURL, p.WebhookEvents,
 		nullTimeRFC(p.LastSyncAt), p.LastSyncStatus,
 		p.ConsecutiveErrors, rfc(p.UpdatedAt), p.ID,
 	)
@@ -198,6 +200,7 @@ func (r *Repository) UpdateSyncPair(p *SyncPair) error {
 }
 
 func (r *Repository) DeleteSyncPair(id string) error {
+	r.db.Exec(`DELETE FROM sync_logs WHERE pair_id = ?`, id)
 	res, err := r.db.Exec(`DELETE FROM sync_pairs WHERE id = ?`, id)
 	if err != nil {
 		return err
@@ -207,6 +210,43 @@ func (r *Repository) DeleteSyncPair(id string) error {
 		return fmt.Errorf("sync pair %q not found", id)
 	}
 	return nil
+}
+
+// --- Sync Logs ---
+
+func (r *Repository) CreateSyncLog(entry *SyncLogEntry) error {
+	entry.ID = uuid.New().String()
+	_, err := r.db.Exec(
+		`INSERT INTO sync_logs (id,pair_id,status,error_msg,succeeded,failed,started_at,completed_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		entry.ID, entry.PairID, entry.Status, entry.ErrorMsg,
+		entry.Succeeded, entry.Failed,
+		rfc(entry.StartedAt), rfc(entry.CompletedAt),
+	)
+	return err
+}
+
+func (r *Repository) ListSyncLogs(pairID string, limit int) ([]SyncLogEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.db.Query(`SELECT id,pair_id,status,error_msg,succeeded,failed,started_at,completed_at FROM sync_logs WHERE pair_id = ? ORDER BY started_at DESC LIMIT ?`, pairID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SyncLogEntry
+	for rows.Next() {
+		var e SyncLogEntry
+		var s, c string
+		if err := rows.Scan(&e.ID, &e.PairID, &e.Status, &e.ErrorMsg, &e.Succeeded, &e.Failed, &s, &c); err != nil {
+			return nil, err
+		}
+		e.StartedAt, _ = time.Parse(time.RFC3339, s)
+		e.CompletedAt, _ = time.Parse(time.RFC3339, c)
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // --- scanning helpers ---
@@ -273,22 +313,24 @@ func scanSyncPair(row *sql.Row) (*SyncPair, error) {
 
 func scanSyncPairFromRow(s rowScanner) (*SyncPair, error) {
 	var (
-		p       SyncPair
-		en, dp  int
-		c, u    string
-		lsa     sql.NullString
-		ce      sql.NullInt64
-		tsc     sql.NullString
+		p           SyncPair
+		en, dp, dr  int
+		c, u        string
+		lsa         sql.NullString
+		ce          sql.NullInt64
+		tsc         sql.NullString
 	)
 	err := s.Scan(&p.ID, &p.Name, &p.SourceBucketID, &p.TargetBucketID,
 		&p.SyncInterval, &p.WorkerCount, &p.MaxGetOpsPerMinute, &dp,
-		&tsc, &en, &lsa, &p.LastSyncStatus,
+		&tsc, &en, &dr, &p.WebhookURL, &p.WebhookEvents,
+		&lsa, &p.LastSyncStatus,
 		&ce, &c, &u)
 	if err != nil {
 		return nil, err
 	}
 	p.Enabled = en == 1
 	p.DeletePropagation = dp == 1
+	p.DryRun = dr == 1
 	p.TargetStorageClass = tsc.String
 	if lsa.Valid {
 		t, _ := time.Parse(time.RFC3339, lsa.String)

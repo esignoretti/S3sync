@@ -1,0 +1,13 @@
+services:
+  s3sync:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - s3sync-config:/root/.s3sync
+    environment:
+      - BUCKETSYNC_MASTER_KEY=${BUCKETSYNC_MASTER_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  s3sync-config:

@@ -1,8 +1,12 @@
 package sync
 
 import (
+	"context"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/esignoretti/S3sync/internal/cache"
 )
 
@@ -21,51 +25,79 @@ type SyncAction struct {
 	LastModified time.Time
 }
 
-type DiffResult struct {
-	NewOrChanged []SyncAction
-	ToDelete     []SyncAction
-	Skipped      int
-}
+// StreamingDiff performs a merge-join between S3 listing pages and the cache cursor.
+// It emits SyncActions to the actions channel as it goes.
+// S3 listing comes page-by-page via listPage func.
+// Cache cursor iterates BoltDB in key order.
+// Both are sorted by key, so we advance both pointers like a merge-join.
+func StreamingDiff(
+	ctx context.Context,
+	listPage func(context.Context, *string) (*s3.ListObjectsV2Output, error),
+	cacheCur *cache.CacheCursor,
+	deletePropagation bool,
+	actions chan<- SyncAction,
+) error {
+	defer close(actions)
 
-func Diff(listing []ListedObject, cached []cache.CachedObject, deletePropagation bool) DiffResult {
-	cm := make(map[string]cache.CachedObject, len(cached))
-	for _, c := range cached {
-		cm[c.Key] = c
-	}
+	var token *string
+	var pageObjs []s3types.Object
+	var pageIdx int
 
-	var actions, deletes []SyncAction
-	skipped := 0
-
-	for _, obj := range listing {
-		cc, found := cm[obj.Key]
-		if !found {
-			actions = append(actions, SyncAction{
-				Type: ActionCopy, Key: obj.Key,
-				ETag: obj.ETag, Size: obj.Size, LastModified: obj.LastModified,
-			})
-			continue
-		}
-		if cc.ETag != obj.ETag || !cc.LastModified.Equal(obj.LastModified) {
-			actions = append(actions, SyncAction{
-				Type: ActionCopy, Key: obj.Key,
-				ETag: obj.ETag, Size: obj.Size, LastModified: obj.LastModified,
-			})
-			continue
-		}
-		skipped++
-	}
-
-	if deletePropagation {
-		lk := make(map[string]struct{}, len(listing))
-		for _, o := range listing {
-			lk[o.Key] = struct{}{}
-		}
-		for _, c := range cached {
-			if _, exists := lk[c.Key]; !exists {
-				deletes = append(deletes, SyncAction{Type: ActionDelete, Key: c.Key})
+	nextListObj := func() (*s3types.Object, bool) {
+		for pageIdx >= len(pageObjs) {
+			out, err := listPage(ctx, token)
+			if err != nil {
+				return nil, false
+			}
+			pageObjs = out.Contents
+			pageIdx = 0
+			token = out.NextContinuationToken
+			if len(pageObjs) == 0 && token == nil {
+				return nil, false
 			}
 		}
+		obj := pageObjs[pageIdx]
+		pageIdx++
+		return &obj, true
 	}
 
-	return DiffResult{NewOrChanged: actions, ToDelete: deletes, Skipped: skipped}
+	cacheHasMore := cacheCur.Next()
+	listObj, listHasMore := nextListObj()
+
+	for listHasMore || cacheHasMore {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if listHasMore && (!cacheHasMore || keyLt(aws.ToString(listObj.Key), cacheCur.Key())) {
+			actions <- SyncAction{
+				Type: ActionCopy, Key: aws.ToString(listObj.Key),
+				ETag: aws.ToString(listObj.ETag), Size: aws.ToInt64(listObj.Size),
+				LastModified: aws.ToTime(listObj.LastModified),
+			}
+			listObj, listHasMore = nextListObj()
+		} else if cacheHasMore && (!listHasMore || keyLt(cacheCur.Key(), aws.ToString(listObj.Key))) {
+			if deletePropagation {
+				actions <- SyncAction{Type: ActionDelete, Key: cacheCur.Key()}
+			}
+			cacheHasMore = cacheCur.Next()
+		} else {
+			co := cacheCur.Object()
+			if co.ETag != aws.ToString(listObj.ETag) || !co.LastModified.Equal(aws.ToTime(listObj.LastModified)) {
+				actions <- SyncAction{
+					Type: ActionCopy, Key: aws.ToString(listObj.Key),
+					ETag: aws.ToString(listObj.ETag), Size: aws.ToInt64(listObj.Size),
+					LastModified: aws.ToTime(listObj.LastModified),
+				}
+			}
+			listObj, listHasMore = nextListObj()
+			cacheHasMore = cacheCur.Next()
+		}
+	}
+
+	return nil
+}
+
+func keyLt(a, b string) bool {
+	return a < b
 }

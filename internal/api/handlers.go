@@ -165,9 +165,12 @@ func (s *Server) getSyncPair(c *gin.Context) {
 func (s *Server) updateSyncPair(c *gin.Context) {
 	id := c.Param("id")
 	var in struct {
-		SyncInterval       *int `json:"sync_interval"`
-		WorkerCount        *int `json:"worker_count"`
-		MaxGetOpsPerMinute *int `json:"max_get_ops_per_minute"`
+		SyncInterval       *int    `json:"sync_interval"`
+		WorkerCount        *int    `json:"worker_count"`
+		MaxGetOpsPerMinute *int    `json:"max_get_ops_per_minute"`
+		WebhookURL         *string `json:"webhook_url"`
+		WebhookEvents      *string `json:"webhook_events"`
+		DryRun             *bool   `json:"dry_run"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
@@ -186,6 +189,15 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 	}
 	if in.MaxGetOpsPerMinute != nil {
 		p.MaxGetOpsPerMinute = *in.MaxGetOpsPerMinute
+	}
+	if in.WebhookURL != nil {
+		p.WebhookURL = *in.WebhookURL
+	}
+	if in.WebhookEvents != nil {
+		p.WebhookEvents = *in.WebhookEvents
+	}
+	if in.DryRun != nil {
+		p.DryRun = *in.DryRun
 	}
 	if err := s.repo.UpdateSyncPair(p); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
@@ -320,6 +332,18 @@ func (s *Server) syncStatus(c *gin.Context) {
 		resp["progress"] = prog
 	}
 	respond(c, http.StatusOK, resp)
+}
+
+func (s *Server) syncLogs(c *gin.Context) {
+	logs, err := s.repo.ListSyncLogs(c.Param("id"), 50)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if logs == nil {
+		logs = []config.SyncLogEntry{}
+	}
+	respond(c, http.StatusOK, logs)
 }
 
 func (s *Server) setup(c *gin.Context) {

@@ -34,30 +34,22 @@ func NewWorkerPool(workers int, client *s3.Client, source, target string,
 	}
 }
 
-func (wp *WorkerPool) Run(ctx context.Context, actions []SyncAction) ([]SyncAction, int, int) {
-	if len(actions) == 0 {
-		return nil, 0, 0
-	}
-
+// Run reads actions from the channel until it is closed.
+func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]SyncAction, int, int) {
 	type result struct {
 		action SyncAction
 		err    error
 	}
-	ch := make(chan SyncAction, len(actions))
-	for _, a := range actions {
-		ch <- a
-	}
-	close(ch)
 
-	results := make(chan result, len(actions))
+	results := make(chan result)
+	var wg sync.WaitGroup
+
 	workerCount := wp.workers
-	if workerCount > len(actions) {
-		workerCount = len(actions)
-	}
-
 	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
 		go func() {
-			for a := range ch {
+			defer wg.Done()
+			for a := range actions {
 				start := time.Now()
 				var err error
 				switch a.Type {
@@ -86,10 +78,14 @@ func (wp *WorkerPool) Run(ctx context.Context, actions []SyncAction) ([]SyncActi
 		}()
 	}
 
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	var succeeded []SyncAction
 	failed := 0
-	for i := 0; i < len(actions); i++ {
-		r := <-results
+	for r := range results {
 		if r.err != nil {
 			failed++
 		} else {

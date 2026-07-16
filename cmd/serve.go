@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/esignoretti/S3sync/internal/api"
 	"github.com/spf13/cobra"
@@ -54,7 +56,20 @@ var serveCmd = &cobra.Command{
 		}
 
 		slog.Info("server starting", "port", port)
-		return srv.Router().Run(fmt.Sprintf(":%d", port))
+		httpSrv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: srv.Router()}
+
+		go func() {
+			<-ctx.Done()
+			slog.Info("shutting down")
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer shutdownCancel()
+			httpSrv.Shutdown(shutdownCtx)
+		}()
+
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
 	},
 }
 
