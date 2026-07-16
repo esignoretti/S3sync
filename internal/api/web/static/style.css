@@ -130,6 +130,7 @@ body {
 }
 .btn-primary { background: var(--blue); color: white; }
 .btn-primary:hover { background: var(--blue-hover); }
+.btn-primary:disabled { background: var(--grey); cursor: not-allowed; opacity: 0.6; }
 .btn-secondary { background: var(--surface-3); color: var(--text); border: 1px solid var(--hairline); }
 .btn-secondary:hover { background: var(--surface-2); }
 

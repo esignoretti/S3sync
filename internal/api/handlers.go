@@ -171,11 +171,10 @@ func (s *Server) setup(c *gin.Context) {
 
 	state.Error = ""
 	respond(c, http.StatusOK, gin.H{
-		"session":    sessionID,
-		"step":       state.Step.String(),
-		"step_num":   int(state.Step),
-		"done":       state.Step >= config.StepDone,
-		"error":      state.Error,
+		"session":  sessionID,
+		"step":     state.Step.String(),
+		"step_num": int(state.Step),
+		"done":     state.Step >= config.StepDone,
 	})
 }
 
