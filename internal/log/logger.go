@@ -65,9 +65,10 @@ func parseLevel(s string) slog.Level {
 }
 
 type textHandler struct {
-	opts slog.HandlerOptions
-	mu   sync.Mutex
-	w    io.Writer
+	opts  slog.HandlerOptions
+	attrs []slog.Attr
+	mu    sync.Mutex
+	w     io.Writer
 }
 
 func newTextHandler(w io.Writer, opts *slog.HandlerOptions) *textHandler {
@@ -79,13 +80,20 @@ func newTextHandler(w io.Writer, opts *slog.HandlerOptions) *textHandler {
 }
 
 func (h *textHandler) Enabled(_ context.Context, lvl slog.Level) bool {
-	return lvl >= h.opts.Level.Level()
+	minLevel := slog.LevelInfo
+	if h.opts.Level != nil {
+		minLevel = h.opts.Level.Level()
+	}
+	return lvl >= minLevel
 }
 
 func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	line := r.Time.Format("15:04:05") + " " + r.Level.String() + "\t" + r.Message
+	for _, a := range h.attrs {
+		line += "  " + a.Key + "=" + a.Value.String()
+	}
 	r.Attrs(func(a slog.Attr) bool {
 		line += "  " + a.Key + "=" + a.Value.String()
 		return true
@@ -95,7 +103,9 @@ func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
 }
 
 func (h *textHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return h
+	cp := *h
+	cp.attrs = append(append([]slog.Attr(nil), h.attrs...), attrs...)
+	return &cp
 }
 
 func (h *textHandler) WithGroup(string) slog.Handler {
