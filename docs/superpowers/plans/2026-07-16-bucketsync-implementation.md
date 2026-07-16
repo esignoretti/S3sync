@@ -3008,7 +3008,7 @@ cd /Users/esignoretti/Documents/OpenCode/BucketSync && git add -A && git commit 
 - Create: `BucketSync/tests/sync_test.go`
 - Create: `BucketSync/tests/api_test.go`
 
-- [ ] **Step 1: Write integration test with minio**
+- [ ] **Step 1: Write integration test (generic S3-compatible)**
 
 ```go
 // tests/sync_test.go
@@ -3026,13 +3026,18 @@ import (
     "github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-func setupMinio(t *testing.T) (client *s3.Client, bucket string) {
+func setupS3(t *testing.T) (*s3.Client, string) {
     t.Helper()
-    endpoint := os.Getenv("MINIO_ENDPOINT")
+    endpoint := os.Getenv("S3_TEST_ENDPOINT")
     if endpoint == "" {
-        t.Skip("MINIO_ENDPOINT not set")
+        t.Skip("S3_TEST_ENDPOINT not set")
     }
-    creds := credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
+    accessKey := os.Getenv("S3_TEST_ACCESS_KEY")
+    secretKey := os.Getenv("S3_TEST_SECRET_KEY")
+    if accessKey == "" || secretKey == "" {
+        t.Skip("S3_TEST_ACCESS_KEY or S3_TEST_SECRET_KEY not set")
+    }
+    creds := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
     cfg, err := config.LoadDefaultConfig(context.TODO(),
         config.WithRegion("us-east-1"),
         config.WithCredentialsProvider(creds),
@@ -3040,11 +3045,11 @@ func setupMinio(t *testing.T) (client *s3.Client, bucket string) {
     if err != nil {
         t.Fatal(err)
     }
-    client = s3.NewFromConfig(cfg, func(o *s3.Options) {
+    client := s3.NewFromConfig(cfg, func(o *s3.Options) {
         o.BaseEndpoint = aws.String(endpoint)
         o.UsePathStyle = true
     })
-    return client, "test-bucket"
+    return client, "test-s3sync"
 }
 ```
 

@@ -286,7 +286,7 @@ Global Flags:
 ## 11. Testing Strategy
 
 - **Unit:** diff engine, cache manager, token bucket throttler, config validation
-- **Integration:** minio test containers for source + target buckets, full sync cycle
+- **Integration:** S3-compatible test endpoint (env vars) for source + target, full sync cycle
 - **CLI:** golden file tests for command output
 - **API:** `net/http/httptest` + in-memory SQLite
 - **Cache:** round-trip serialize/deserialize, rebuild from listing

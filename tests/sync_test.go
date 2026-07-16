@@ -14,13 +14,19 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-func setupMinio(t *testing.T) (*s3.Client, string) {
+func setupS3Client(t *testing.T) (*s3.Client, string) {
 	t.Helper()
-	endpoint := os.Getenv("MINIO_ENDPOINT")
+	endpoint := os.Getenv("S3_TEST_ENDPOINT")
 	if endpoint == "" {
-		t.Skip("MINIO_ENDPOINT not set")
+		t.Skip("S3_TEST_ENDPOINT not set")
 	}
-	creds := credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
+	accessKey := os.Getenv("S3_TEST_ACCESS_KEY")
+	secretKey := os.Getenv("S3_TEST_SECRET_KEY")
+	if accessKey == "" || secretKey == "" {
+		t.Skip("S3_TEST_ACCESS_KEY or S3_TEST_SECRET_KEY not set")
+	}
+
+	creds := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithRegion("us-east-1"),
 		config.WithCredentialsProvider(creds),
@@ -32,16 +38,15 @@ func setupMinio(t *testing.T) (*s3.Client, string) {
 		o.BaseEndpoint = aws.String(endpoint)
 		o.UsePathStyle = true
 	})
-	return client, "test-bucket"
+	return client, "test-s3sync-integration"
 }
 
-func TestMinioConnection(t *testing.T) {
-	client, bucket := setupMinio(t)
+func TestS3Connection(t *testing.T) {
+	client, bucket := setupS3Client(t)
 	_, err := client.HeadBucket(context.TODO(), &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	})
 	if err != nil {
 		t.Logf("bucket %q may not exist: %v", bucket, err)
-		// Not a failure — the test just verifies we can connect
 	}
 }

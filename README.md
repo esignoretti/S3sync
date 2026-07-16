@@ -19,7 +19,7 @@ bucketsync pair sync <pair-id>
 - **CLI + API + Web UI** — single binary, `serve` mode starts all three
 - **Dual DB** — SQLite for config (PgSQL path ready), BoltDB for sync cache
 - **Encrypted credentials** — AES-256-GCM with master key env var
-- **S3-compatible** — works with AWS, MinIO, any S3-compatible endpoint
+- **S3-compatible** — works with AWS, Cubbit DS3, any S3-compatible endpoint
 
 ## Install
 
@@ -151,9 +151,11 @@ go vet ./...
 go build -o bucketsync .
 ```
 
-Integration tests require a MinIO instance:
+Integration tests require a compatible S3 endpoint:
 ```bash
-export MINIO_ENDPOINT=http://localhost:9000
+export S3_TEST_ENDPOINT=http://localhost:9000
+export S3_TEST_ACCESS_KEY=test
+export S3_TEST_SECRET_KEY=test
 go test -tags=integration ./tests/ -v
 ```
 
