@@ -1,0 +1,6 @@
+/bucketsync
+*.db
+*.db-wal
+*.db-shm
+*.test
+*.out
