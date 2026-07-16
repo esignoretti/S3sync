@@ -67,7 +67,7 @@ func parseLevel(s string) slog.Level {
 type textHandler struct {
 	opts  slog.HandlerOptions
 	attrs []slog.Attr
-	mu    sync.Mutex
+	mu    *sync.Mutex
 	w     io.Writer
 }
 
@@ -76,7 +76,7 @@ func newTextHandler(w io.Writer, opts *slog.HandlerOptions) *textHandler {
 	if opts != nil {
 		o = *opts
 	}
-	return &textHandler{w: w, opts: o}
+	return &textHandler{w: w, opts: o, mu: &sync.Mutex{}}
 }
 
 func (h *textHandler) Enabled(_ context.Context, lvl slog.Level) bool {
