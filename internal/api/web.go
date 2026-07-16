@@ -30,6 +30,6 @@ func init() {
 
 func (s *Server) serveWeb(c *gin.Context) {
 	webTemplates.ExecuteTemplate(c.Writer, "layout.html", gin.H{
-		"title": "BucketSync",
+		"title": "S3sync",
 	})
 }

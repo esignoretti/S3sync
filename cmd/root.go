@@ -8,9 +8,9 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "bucketsync",
+	Use:   "s3sync",
 	Short: "Keep S3 buckets in sync, one-way",
-	Long:  `BucketSync — one-way S3 bucket sync with CLI, API, and web UI.`,
+	Long:  `S3sync — one-way S3 bucket sync with CLI, API, and web UI.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		level, _ := cmd.Flags().GetString("log-level")
 		format, _ := cmd.Flags().GetString("log-format")
@@ -31,7 +31,7 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().String("config-dir", "", "config directory (default: ~/.bucketsync/)")
+	rootCmd.PersistentFlags().String("config-dir", "", "config directory (default: ~/.s3sync/)")
 	rootCmd.PersistentFlags().String("log-level", "info", "log level: debug|info|warn|error")
 	rootCmd.PersistentFlags().String("log-format", "text", "log format: text|json")
 	rootCmd.PersistentFlags().String("log-file", "", "log file path (optional)")

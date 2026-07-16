@@ -14,7 +14,7 @@ func defaultConfigDir() string {
 		return d
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".bucketsync")
+	return filepath.Join(home, ".s3sync")
 }
 
 func openConfig() (*config.Repository, func(), error) {
