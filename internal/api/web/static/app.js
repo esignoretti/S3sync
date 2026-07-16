@@ -118,7 +118,7 @@ async function pollStatus() {
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
                     <button class="btn btn-sm ${p.enabled ? 'btn-secondary' : 'btn-primary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Pause' : 'Resume'}</button>
                     <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${p.id}">Edit</button>
-                    <button class="btn btn-sm btn-secondary" data-action="reset" data-id="${p.id}">Restart</button>
+                    <button class="btn btn-sm btn-secondary" data-action="reset" data-id="${p.id}">Reset</button>
                     <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
                 </div>
             `;
@@ -149,6 +149,14 @@ async function pollStatus() {
         grid.querySelectorAll('[data-action="edit"]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 openEditModal(btn.dataset.id);
+            });
+        });
+        grid.querySelectorAll('[data-action="reset"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!confirm('Reset sync pair? This clears cache and status, then restarts from scratch.')) return;
+                btn.disabled = true; btn.textContent = 'Resetting...';
+                try { await fetch('/api/sync-pairs/' + btn.dataset.id + '/reset', { method: 'POST' }); } catch(e) {}
+                pollStatus();
             });
         });
     } catch(e) {

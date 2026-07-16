@@ -273,7 +273,7 @@ func (s *Server) resetSyncPair(c *gin.Context) {
 		slog.Error("reset: clear cache", "pair", id, "error", err)
 	}
 
-	// Reset DB fields
+	// Reset DB fields and ensure enabled
 	p, err := s.repo.GetSyncPair(id)
 	if err != nil {
 		respondError(c, http.StatusNotFound, err.Error())
@@ -282,14 +282,13 @@ func (s *Server) resetSyncPair(c *gin.Context) {
 	p.LastSyncAt = nil
 	p.LastSyncStatus = ""
 	p.ConsecutiveErrors = 0
+	p.Enabled = true
 	if err := s.repo.UpdateSyncPair(p); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// Re-enable and start fresh loop
-	p.Enabled = true
-	s.repo.UpdateSyncPair(p)
+	// Start fresh engine loop
 	if err := s.StartEngineLoop(s.rootCtx, *p); err != nil {
 		slog.Error("reset: start engine loop", "pair", id, "error", err)
 	}
