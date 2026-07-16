@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -180,7 +181,7 @@ func (s *Server) disableSyncPair(c *gin.Context) {
 
 func (s *Server) triggerSync(c *gin.Context) {
 	go func() {
-		if err := sync.RunOneShot(c.Request.Context(), s.repo, c.Param("id"), s.cacheDir); err != nil {
+		if err := sync.RunOneShot(context.Background(), s.repo, c.Param("id"), s.cacheDir); err != nil {
 			slog.Warn("trigger sync", "pair", c.Param("id"), "error", err)
 		}
 	}()
