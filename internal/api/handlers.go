@@ -1,11 +1,13 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/esignoretti/S3sync/internal/config"
+	"github.com/esignoretti/S3sync/internal/sync"
 )
 
 type apiResponse struct {
@@ -138,11 +140,25 @@ func (s *Server) deleteSyncPair(c *gin.Context) {
 }
 
 func (s *Server) triggerSync(c *gin.Context) {
+	go func() {
+		if err := sync.RunOneShot(c.Request.Context(), s.repo, c.Param("id"), s.cacheDir); err != nil {
+			slog.Warn("trigger sync", "pair", c.Param("id"), "error", err)
+		}
+	}()
 	respond(c, http.StatusAccepted, gin.H{"message": "sync triggered"})
 }
 
 func (s *Server) syncStatus(c *gin.Context) {
-	respond(c, http.StatusOK, gin.H{"status": "idle"})
+	p, err := s.repo.GetSyncPair(c.Param("id"))
+	if err != nil {
+		respondError(c, http.StatusNotFound, err.Error())
+		return
+	}
+	respond(c, http.StatusOK, gin.H{
+		"status":            p.LastSyncStatus,
+		"last_sync_at":      p.LastSyncAt,
+		"consecutive_errors": p.ConsecutiveErrors,
+	})
 }
 
 func (s *Server) setup(c *gin.Context) {

@@ -9,11 +9,12 @@ import (
 
 type Server struct {
 	repo        *config.Repository
+	cacheDir    string
 	setupStates map[string]*config.SetupState
 }
 
-func NewServer(repo *config.Repository) *Server {
-	return &Server{repo: repo, setupStates: make(map[string]*config.SetupState)}
+func NewServer(repo *config.Repository, cacheDir string) *Server {
+	return &Server{repo: repo, cacheDir: cacheDir, setupStates: make(map[string]*config.SetupState)}
 }
 
 func (s *Server) Router() *gin.Engine {

@@ -24,7 +24,7 @@ func TestAPIHealth(t *testing.T) {
 	defer db.Close()
 
 	repo := config.NewRepository(db)
-	srv := api.NewServer(repo)
+	srv := api.NewServer(repo, ":memory:")
 	router := srv.Router()
 
 	w := httptest.NewRecorder()
@@ -56,7 +56,7 @@ func TestAPIBucketCRUD(t *testing.T) {
 	defer db.Close()
 
 	repo := config.NewRepository(db)
-	srv := api.NewServer(repo)
+	srv := api.NewServer(repo, ":memory:")
 	router := srv.Router()
 
 	// Create bucket
@@ -120,7 +120,7 @@ func TestAPISyncPairCRUD(t *testing.T) {
 	defer db.Close()
 
 	repo := config.NewRepository(db)
-	srv := api.NewServer(repo)
+	srv := api.NewServer(repo, ":memory:")
 	router := srv.Router()
 
 	// Create two buckets first
