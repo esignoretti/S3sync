@@ -14,7 +14,7 @@ s3sync pair sync <pair-id>
 
 ## Features
 
-- **One-way sync** — source → target, etag-based diff, delete propagation
+- **One-way sync** — source → target, ETag-based diff, delete propagation
 - **Parallel transfers** — configurable goroutine worker pool per sync pair
 - **Throttling** — token bucket limits GET ops per minute on source bucket
 - **Target auto-config** — creates bucket, enables versioning, object lock with retention
@@ -194,16 +194,35 @@ s3sync (single binary)
 
 Sync engine per pair (goroutine):
   Ticker → RunOnce:
-    Lister (ListObjectsV2) → Cache compare → Diff → Worker pool (COPY/DELETE) → Cache update
+    ListObjectsV2 → Cache compare (ETag) → Diff → Worker pool (COPY/DELETE) → Cache update (succeeded only)
 
 Worker pool:
   N goroutines pull from buffered action channel
-  Each action: throttle.Wait → HEAD (skip if same ETag) → CopyObject / DeleteObject
+  Each action: throttle.Wait → HEAD target (skip if same ETag) → CopyObject / DeleteObject
   Token-bucket rate limiter per pair
 
 Only successfully transferred objects are cached.
 Failed objects retry on next cycle.
 ```
+
+### Sync Cycle Details
+
+Each cycle:
+1. **List** all source objects via paginated `ListObjectsV2` (1000/page)
+2. **Load cache** from BoltDB for this pair (objects from previous successful syncs)
+3. **Diff** — compare ETag + LastModified against cache:
+   - Not in cache → COPY
+   - ETag or timestamp changed → COPY
+   - Match → skip
+   - In cache but not in listing (if delete propagation enabled) → DELETE
+4. **Execute** — worker pool copies new/changed, deletes removed
+5. **Cache only succeeded** — failed items not cached, retried next cycle
+
+### Restart Behavior
+
+On server restart, cache persists. First sync cycle compares all source ETags against cached ETags. Already-synced objects match and skip. Only new or changed objects are copied.
+
+If cache is missing or corrupted, `copyObject` does a HEAD on the target — if target ETag matches source, the copy is skipped. No redundant transfers in either case.
 
 ## Configuration
 
