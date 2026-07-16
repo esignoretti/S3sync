@@ -1,15 +1,35 @@
 package api
 
 import (
-	"net/http"
+	"embed"
+	"html/template"
+	"io/fs"
 
 	"github.com/gin-gonic/gin"
 )
 
+//go:embed web/templates/*.html
+var templateFS embed.FS
+
+//go:embed web/static/*
+var staticFS embed.FS
+
+var (
+	webTemplates *template.Template
+	webStatic    fs.FS
+)
+
+func init() {
+	webTemplates = template.Must(template.ParseFS(templateFS, "web/templates/*.html"))
+	staticSub, err := fs.Sub(staticFS, "web/static")
+	if err != nil {
+		panic(err)
+	}
+	webStatic = staticSub
+}
+
 func (s *Server) serveWeb(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"service": "bucketsync",
-		"version": "0.1.0",
-		"docs":    "see /api/health",
+	webTemplates.ExecuteTemplate(c.Writer, "layout.html", gin.H{
+		"title": "BucketSync",
 	})
 }

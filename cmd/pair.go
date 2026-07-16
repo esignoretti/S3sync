@@ -1,12 +1,18 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
+	"time"
 
+	"github.com/esignoretti/bucketsync/internal/cache"
 	"github.com/esignoretti/bucketsync/internal/config"
+	"github.com/esignoretti/bucketsync/internal/s3client"
+	"github.com/esignoretti/bucketsync/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -157,7 +163,63 @@ var pairSyncCmd = &cobra.Command{
 	Short: "Trigger one-shot sync for a pair",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("Sync triggered for pair %s\n", args[0])
+		repo, close, err := openConfig()
+		if err != nil {
+			return err
+		}
+		defer close()
+
+		pair, err := repo.GetSyncPair(args[0])
+		if err != nil {
+			return err
+		}
+		src, err := repo.GetBucket(pair.SourceBucketID)
+		if err != nil {
+			return err
+		}
+		tgt, err := repo.GetBucket(pair.TargetBucketID)
+		if err != nil {
+			return err
+		}
+
+		srcS3, err := s3client.NewClient(src)
+		if err != nil {
+			return err
+		}
+		tgtS3, err := s3client.NewClient(tgt)
+		if err != nil {
+			return err
+		}
+
+		cacheDir := filepath.Join(defaultConfigDir(), "cache.db")
+		cacheStore, err := cache.Open(cacheDir)
+		if err != nil {
+			return err
+		}
+		defer cacheStore.Close()
+
+		engine := sync.NewEngine(pair, src, tgt, srcS3, tgtS3, cacheStore)
+		ctx := context.Background()
+
+		start := time.Now()
+		if err := engine.RunOnce(ctx); err != nil {
+			return fmt.Errorf("sync failed: %w", err)
+		}
+
+		_, _, status := engine.Status()
+		now := time.Now().UTC()
+		pair.LastSyncAt = &now
+		pair.LastSyncStatus = status
+		if status == "error" {
+			pair.ConsecutiveErrors++
+		} else {
+			pair.ConsecutiveErrors = 0
+		}
+		if err := repo.UpdateSyncPair(pair); err != nil {
+			return err
+		}
+
+		fmt.Printf("Sync complete for %q. Status: %s (duration: %s)\n", pair.Name, status, time.Since(start).Round(time.Second))
 		return nil
 	},
 }

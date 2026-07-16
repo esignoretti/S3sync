@@ -1,6 +1,8 @@
 package api
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/esignoretti/bucketsync/internal/config"
 )
@@ -37,7 +39,7 @@ func (s *Server) Router() *gin.Engine {
 	}
 
 	r.GET("/", s.serveWeb)
-	r.Static("/static", "./internal/api/web/static")
+	r.StaticFS("/static", http.FS(webStatic))
 
 	return r
 }
