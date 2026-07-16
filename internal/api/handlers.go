@@ -103,6 +103,8 @@ type syncPairResponse struct {
 	TargetBucket string `json:"target_bucket"`
 	SourceName   string `json:"source_name"`
 	TargetName   string `json:"target_name"`
+	SourceURL    string `json:"source_url"`
+	TargetURL    string `json:"target_url"`
 }
 
 func enrichPair(repo *config.Repository, p config.SyncPair) syncPairResponse {
@@ -110,10 +112,12 @@ func enrichPair(repo *config.Repository, p config.SyncPair) syncPairResponse {
 	if src, err := repo.GetBucket(p.SourceBucketID); err == nil {
 		r.SourceBucket = src.BucketName
 		r.SourceName = src.Name
+		r.SourceURL = src.Endpoint + "/" + src.BucketName
 	}
 	if tgt, err := repo.GetBucket(p.TargetBucketID); err == nil {
 		r.TargetBucket = tgt.BucketName
 		r.TargetName = tgt.Name
+		r.TargetURL = tgt.Endpoint + "/" + tgt.BucketName
 	}
 	return r
 }
