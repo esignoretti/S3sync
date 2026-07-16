@@ -3197,4 +3197,4 @@ cd /Users/esignoretti/Documents/OpenCode/BucketSync && git add -A && git commit 
 | 11. Testing | Task 15 |
 | 13. Config Defaults | Task 4 (model fields) |
 
-**Deferred to v1.1:** Target bucket auto-config (HEAD bucket, create, configure versioning/object lock). The engine already supports target options, but the auto-setup logic is not yet implemented.
+**Implemented:** Target bucket auto-config (`internal/sync/setup.go`). Engine checks HEAD, creates bucket with region, configures versioning + object lock + retention. Warnings on mismatch.
