@@ -83,7 +83,10 @@ func (in *SetupInput) ToBucket() *Bucket {
 	}
 }
 
-func (in *SetupInput) ToSyncPair() *SyncPair {
+func (in *SetupInput) ToSyncPair(srcName, tgtName string) *SyncPair {
+	if in.PairName == "" {
+		in.PairName = srcName + "-to-" + tgtName
+	}
 	p := &SyncPair{
 		Name:               in.PairName,
 		SourceBucketID:     in.SourceBucketID,
@@ -141,10 +144,16 @@ func (s *SetupState) Apply(repo *Repository, in *SetupInput) error {
 			s.Step = StepTargetBucket
 			return nil
 		}
+		// Hydrate IDs from state (web form doesn't send them)
+		in.SourceBucketID = s.SourceBucket.ID
+		in.TargetBucketID = s.TargetBucket.ID
+		if in.PairName == "" {
+			in.PairName = s.SourceBucket.Name + "-to-" + s.TargetBucket.Name
+		}
 		if err := validateSyncPair(in, s); err != nil {
 			return fmt.Errorf("sync pair: %w", err)
 		}
-		p := in.ToSyncPair()
+		p := in.ToSyncPair(s.SourceBucket.Name, s.TargetBucket.Name)
 		if err := repo.CreateSyncPair(p); err != nil {
 			return fmt.Errorf("create sync pair: %w", err)
 		}
