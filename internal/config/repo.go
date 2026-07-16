@@ -81,6 +81,16 @@ func (r *Repository) GetBucket(id string) (*Bucket, error) {
 	return b, nil
 }
 
+func (r *Repository) GetBucketByName(name string) (*Bucket, error) {
+	row := r.db.QueryRow(`SELECT id,name,endpoint,region,access_key,secret_key,bucket_name,object_lock,versioning,retention_mode,retention_days,created_at,updated_at FROM buckets WHERE name = ?`, name)
+	b, err := scanBucket(row)
+	if err != nil {
+		return nil, err
+	}
+	decryptCreds(r.key, b)
+	return b, nil
+}
+
 func (r *Repository) UpdateBucket(b *Bucket) error {
 	b.UpdatedAt = time.Now().UTC()
 

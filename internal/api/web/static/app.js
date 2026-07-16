@@ -1,23 +1,10 @@
 document.addEventListener('alpine:init', () => {
     Alpine.data('setupWizard', () => ({
         step: 1,
-        session: localStorage.getItem('s3sync-setup-session') || '',
+        session: '',
         error: '',
         loading: false,
         f: defaultForm(),
-        init() {
-            if (this.session) this.syncState();
-        },
-        async syncState() {
-            try {
-                let res = await fetch('/api/setup?session=' + this.session);
-                if (!res.ok) return;
-                let json = await res.json();
-                let d = json.data || json;
-                this.step = d.step_num || 1;
-                if (d.done) this.step = 4;
-            } catch(e) {}
-        },
         async submit(role) {
             if (this.loading) return;
             this.loading = true;
@@ -59,10 +46,9 @@ document.addEventListener('alpine:init', () => {
                 }
                 let d = json.data || json;
                 this.session = d.session;
-                localStorage.setItem('s3sync-setup-session', d.session);
                 this.step = d.step_num;
                 if (d.step_num === 2) this.f = defaultForm();
-                if (d.done) { localStorage.removeItem('s3sync-setup-session'); this.step = 4; }
+                if (d.done) { this.step = 4; }
             } catch(e) {
                 this.error = 'Network error';
             }

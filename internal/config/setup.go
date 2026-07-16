@@ -121,9 +121,9 @@ func (s *SetupState) Apply(repo *Repository, in *SetupInput) error {
 		if err := validateBucket(in); err != nil {
 			return fmt.Errorf("source bucket: %w", err)
 		}
-		b := in.ToBucket()
-		if err := repo.CreateBucket(b); err != nil {
-			return fmt.Errorf("create source bucket: %w", err)
+		b, err := getOrCreateBucket(repo, in)
+		if err != nil {
+			return fmt.Errorf("source bucket: %w", err)
 		}
 		s.SourceBucket = b
 		s.Step = StepTargetBucket
@@ -132,9 +132,9 @@ func (s *SetupState) Apply(repo *Repository, in *SetupInput) error {
 		if err := validateBucket(in); err != nil {
 			return fmt.Errorf("target bucket: %w", err)
 		}
-		b := in.ToBucket()
-		if err := repo.CreateBucket(b); err != nil {
-			return fmt.Errorf("create target bucket: %w", err)
+		b, err := getOrCreateBucket(repo, in)
+		if err != nil {
+			return fmt.Errorf("target bucket: %w", err)
 		}
 		s.TargetBucket = b
 		s.Step = StepSyncPair
@@ -165,6 +165,18 @@ func (s *SetupState) Apply(repo *Repository, in *SetupInput) error {
 	}
 
 	return nil
+}
+
+func getOrCreateBucket(repo *Repository, in *SetupInput) (*Bucket, error) {
+	b, err := repo.GetBucketByName(in.Name)
+	if err == nil {
+		return b, nil // bucket already exists, use it
+	}
+	b = in.ToBucket()
+	if err := repo.CreateBucket(b); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func validateBucket(in *SetupInput) error {
