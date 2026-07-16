@@ -178,9 +178,11 @@ function closeEditModal() {
 async function saveEdit() {
     let interval = parseInt(document.getElementById('edit-interval').value);
     let workers = parseInt(document.getElementById('edit-workers').value);
+    let maxOps = parseInt(document.getElementById('edit-max-ops').value);
     let body = {};
     if (!isNaN(interval)) body.sync_interval = interval;
     if (!isNaN(workers)) body.worker_count = workers;
+    if (!isNaN(maxOps)) body.max_get_ops_per_minute = maxOps;
     try {
         await fetch('/api/sync-pairs/' + editPairId, {
             method: 'PUT',

@@ -1,13 +1,15 @@
 # S3sync
 
-One-way S3 bucket sync. CLI, REST API, and embedded web UI. Configurable parallelism, token-bucket throttling, object lock support.
+One-way S3-compatible bucket sync. CLI, REST API, and embedded web UI. Configurable parallelism, token-bucket throttling, object lock support.
+
+Optimized for **Cubbit DS3** but works with any S3-compatible endpoint (AWS, MinIO, etc.).
 
 ```
-bucketsync config init
-bucketsync bucket add prod-source   --endpoint https://s3.eu-west-1.amazonaws.com --region eu-west-1 --bucket-name my-data --access-key AKID --secret-key secret
-bucketsync bucket add prod-target   --endpoint https://s3.eu-west-1.amazonaws.com --region eu-west-1 --bucket-name my-data-replica --access-key AKID --secret-key secret --versioning --object-lock --retention-mode GOVERNANCE --retention-days 365
-bucketsync pair add prod-sync       --source-bucket <src-id> --target-bucket <tgt-id> --interval 300 --workers 20 --max-ops 600
-bucketsync pair sync <pair-id>
+s3sync config init
+s3sync bucket add prod-source   --endpoint https://s3.cubbit.eu --region eu-west-1 --bucket-name my-data --access-key AKID --secret-key secret
+s3sync bucket add prod-target   --endpoint https://s3.cubbit.eu --region eu-west-1 --bucket-name my-data-replica --access-key AKID --secret-key secret --versioning --object-lock --retention-mode GOVERNANCE --retention-days 365
+s3sync pair add prod-sync       --source-bucket <src-id> --target-bucket <tgt-id> --interval 300 --workers 20 --max-ops 600
+s3sync pair sync <pair-id>
 ```
 
 ## Features
@@ -17,39 +19,39 @@ bucketsync pair sync <pair-id>
 - **Throttling** — token bucket limits GET ops per minute on source bucket
 - **Target auto-config** — creates bucket, enables versioning, object lock with retention
 - **CLI + API + Web UI** — single binary, `serve` mode starts all three
-- **Dual DB** — SQLite for config (PgSQL path ready), BoltDB for sync cache
+- **Dual DB** — SQLite for config, BoltDB for sync cache
 - **Encrypted credentials** — AES-256-GCM with master key env var
-- **S3-compatible** — works with AWS, Cubbit DS3, any S3-compatible endpoint
+- **S3-compatible** — works with Cubbit DS3, AWS, any S3-compatible endpoint
+- **Live dashboard** — progress bars, status pills, Pause/Resume/Reset per pair
 
 ## Install
 
 ```bash
-# Download or build
 go install github.com/esignoretti/S3sync@latest
 
 # Or build from source
 git clone https://github.com/esignoretti/S3sync.git
 cd S3sync
-go build -o bucketsync .
+go build -o s3sync .
 ```
 
 ## Quick Start
 
 ```bash
 # 1. Initialize config
-bucketsync config init
+s3sync config init
 
 # 2. Add buckets
-bucketsync bucket add source \
-  --endpoint https://s3.amazonaws.com \
-  --region us-east-1 \
+s3sync bucket add source \
+  --endpoint https://s3.cubbit.eu \
+  --region eu-west-1 \
   --bucket-name my-source-bucket \
   --access-key AKIDEXAMPLE \
   --secret-key wJalrXUt
 
-bucketsync bucket add target \
-  --endpoint https://s3.amazonaws.com \
-  --region us-east-1 \
+s3sync bucket add target \
+  --endpoint https://s3.cubbit.eu \
+  --region eu-west-1 \
   --bucket-name my-target-bucket \
   --access-key AKIDEXAMPLE \
   --secret-key wJalrXUt \
@@ -59,7 +61,7 @@ bucketsync bucket add target \
   --retention-days 365
 
 # 3. Create sync pair
-bucketsync pair add my-sync \
+s3sync pair add my-sync \
   --source-bucket <source-id-from-list> \
   --target-bucket <target-id-from-list> \
   --interval 300 \
@@ -67,16 +69,16 @@ bucketsync pair add my-sync \
   --max-ops 600
 
 # 4. Trigger one-shot sync
-bucketsync pair sync <pair-id>
+s3sync pair sync <pair-id>
 
-# 5. Or run continuous sync server
-bucketsync serve --port 8080
+# 5. Or run continuous sync server (visit http://localhost:8080)
+s3sync serve --port 8080
 ```
 
 ## CLI Reference
 
 ```
-Usage: bucketsync [command]
+Usage: s3sync [command]
 
 Commands:
   config            Manage configuration
@@ -104,9 +106,10 @@ Commands:
 
   serve             Start API server + sync engine + web UI
   status            Show sync status (table)
+  setup             Interactive wizard (stdin)
 
 Global Flags:
-  --config-dir    Config directory (default: ~/.bucketsync/)
+  --config-dir    Config directory (default: ~/.s3sync/)
   --log-level     debug|info|warn|error (default: info)
   --log-format    text|json (default: text)
   --log-file      Log file path (optional)
@@ -114,44 +117,114 @@ Global Flags:
 
 ## Serve Mode
 
-`bucketsync serve` starts an HTTP server on `:8080` with:
+`s3sync serve` starts an HTTP server with:
 
 - **REST API** — full CRUD for buckets and sync pairs via `/api/*`
 - **Background sync** — runs sync cycle per enabled pair on its configured interval
-- **Web UI** — dark-themed dashboard showing pair status, polling live (Cubbit-inspired design)
+- **Web UI** — dark-themed dashboard with live polling (Cubbit-inspired design)
+
+### Web Dashboard
+
+Cards show per-pair:
+- Status pill (synced, running, error, idle)
+- Source and target with endpoint URLs
+- Sync interval, worker count
+- Last sync time and error count
+- Live progress bar during active sync
+- Error detail when sync fails
+
+| Button | Action |
+|--------|--------|
+| Sync Now | One-shot sync cycle |
+| Pause / Resume | Toggle periodic sync loop on/off |
+| Edit | Change interval, workers, rate limit |
+| Reset | Clear cache + status, restart from scratch |
+| Delete | Remove pair config |
+
+## API
+
+All responses wrapped in `{"data": ...}` envelope. Errors return `{"error": "..."}`.
+
+### Buckets
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/buckets` | Create bucket config |
+| GET | `/api/buckets` | List all |
+| GET | `/api/buckets/:id` | Get one |
+| PUT | `/api/buckets/:id` | Update |
+| DELETE | `/api/buckets/:id` | Delete |
+
+### Sync Pairs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/sync-pairs` | Create sync pair |
+| GET | `/api/sync-pairs` | List all (enriched with live engine status) |
+| GET | `/api/sync-pairs/:id` | Get one |
+| PUT | `/api/sync-pairs/:id` | Partial update (sync_interval, worker_count, max_get_ops_per_minute) |
+| DELETE | `/api/sync-pairs/:id` | Delete + stop engine |
+| POST | `/api/sync-pairs/:id/sync` | Trigger one-shot sync |
+| POST | `/api/sync-pairs/:id/disable` | Toggle enabled (Pause/Resume) |
+| POST | `/api/sync-pairs/:id/reset` | Clear cache, reset status, restart loop |
+| GET | `/api/sync-pairs/:id/status` | Live status + progress from engine |
+
+### System
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Health check |
+| GET | `/api/version` | Version info |
+
+### Setup Wizard
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/setup` | Submit setup step (with X-Setup-Session header) |
+| GET | `/api/setup?session=...` | Get setup state |
 
 ## Architecture
 
 ```
-bucketsync (single binary)
-├── CLI mode — config management, one-shot sync
+s3sync (single binary)
+├── CLI mode — config management, one-shot sync, interactive setup
 ├── Serve mode — REST API + sync engine + embedded web UI
-├── Config DB — SQLite (PostgreSQL adapter path ready)
-└── Cache DB — BoltDB (per-pair sync state)
+├── Config DB — SQLite (~/.s3sync/config.db)
+└── Cache DB — BoltDB (~/.s3sync/cache.db)
 
-Sync engine per pair:
-  Scheduler (ticker) → Lister (S3 ListObjectsV2) → Cache compare → Diff → Worker pool (COPY/DELETE)
+Sync engine per pair (goroutine):
+  Ticker → RunOnce:
+    Lister (ListObjectsV2) → Cache compare → Diff → Worker pool (COPY/DELETE) → Cache update
+
+Worker pool:
+  N goroutines pull from buffered action channel
+  Each action: throttle.Wait → HEAD (skip if same ETag) → CopyObject / DeleteObject
+  Token-bucket rate limiter per pair
+
+Only successfully transferred objects are cached.
+Failed objects retry on next cycle.
 ```
 
 ## Configuration
 
-**Credentials:** S3 access/secret keys are encrypted at rest with AES-256-GCM. Set `BUCKETSYNC_MASTER_KEY` environment variable for the encryption key.
+**Credentials:** S3 access/secret keys encrypted at rest with AES-256-GCM. Set `BUCKETSYNC_MASTER_KEY` env var for encryption.
 
-**Target bucket:** On first sync, the engine checks if the target bucket exists. If not, it creates it with the source region, enables versioning and object lock if configured. Warnings are logged if an existing bucket lacks requested features.
+**Target bucket:** On first sync, engine checks if target exists. If not, creates it with source region, enables versioning and object lock if configured.
 
-**Throttling:** Each sync pair can set `max_get_ops_per_minute`. A token bucket limits GET/HEAD operations on the source bucket. Set to 0 for unlimited (default).
+**Throttling:** Each sync pair sets `max_get_ops_per_minute`. Token bucket limits GET/HEAD ops on source. 0 = unlimited.
 
-**Cache:** Object metadata (etag, size, last-modified) is cached in BoltDB. Each sync cycle diffs the fresh listing against the cache to find new, changed, or deleted objects. The cache can be rebuilt from a full listing without affecting config.
+**Defaults:** Endpoint `https://s3.cubbit.eu`, region `eu-west-1` (Cubbit DS3).
 
 ## Development
 
 ```bash
 go test ./...
 go vet ./...
-go build -o bucketsync .
+go build -o s3sync .
 ```
 
 Integration tests require a compatible S3 endpoint:
+
 ```bash
 export S3_TEST_ENDPOINT=http://localhost:9000
 export S3_TEST_ACCESS_KEY=test

@@ -166,8 +166,9 @@ func (s *Server) getSyncPair(c *gin.Context) {
 func (s *Server) updateSyncPair(c *gin.Context) {
 	id := c.Param("id")
 	var in struct {
-		SyncInterval *int `json:"sync_interval"`
-		WorkerCount  *int `json:"worker_count"`
+		SyncInterval       *int `json:"sync_interval"`
+		WorkerCount        *int `json:"worker_count"`
+		MaxGetOpsPerMinute *int `json:"max_get_ops_per_minute"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
@@ -183,6 +184,9 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 	}
 	if in.WorkerCount != nil {
 		p.WorkerCount = *in.WorkerCount
+	}
+	if in.MaxGetOpsPerMinute != nil {
+		p.MaxGetOpsPerMinute = *in.MaxGetOpsPerMinute
 	}
 	if err := s.repo.UpdateSyncPair(p); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
