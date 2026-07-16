@@ -259,6 +259,44 @@ func (s *Server) triggerSync(c *gin.Context) {
 	respond(c, http.StatusAccepted, gin.H{"message": "sync triggered"})
 }
 
+func (s *Server) resetSyncPair(c *gin.Context) {
+	id := c.Param("id")
+
+	// Stop engine if running
+	if eng, ok := s.engines[id]; ok {
+		eng.Stop()
+		delete(s.engines, id)
+	}
+
+	// Clear cache for this pair
+	if err := s.cache.Clear(id); err != nil {
+		slog.Error("reset: clear cache", "pair", id, "error", err)
+	}
+
+	// Reset DB fields
+	p, err := s.repo.GetSyncPair(id)
+	if err != nil {
+		respondError(c, http.StatusNotFound, err.Error())
+		return
+	}
+	p.LastSyncAt = nil
+	p.LastSyncStatus = ""
+	p.ConsecutiveErrors = 0
+	if err := s.repo.UpdateSyncPair(p); err != nil {
+		respondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Re-enable and start fresh loop
+	p.Enabled = true
+	s.repo.UpdateSyncPair(p)
+	if err := s.StartEngineLoop(s.rootCtx, *p); err != nil {
+		slog.Error("reset: start engine loop", "pair", id, "error", err)
+	}
+
+	respond(c, http.StatusOK, gin.H{"message": "reset done"})
+}
+
 func (s *Server) syncStatus(c *gin.Context) {
 	p, err := s.repo.GetSyncPair(c.Param("id"))
 	if err != nil {

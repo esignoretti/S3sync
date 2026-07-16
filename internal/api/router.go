@@ -157,6 +157,7 @@ func (s *Server) Router() *gin.Engine {
 		api.DELETE("/sync-pairs/:id", s.deleteSyncPair)
 		api.POST("/sync-pairs/:id/sync", s.triggerSync)
 		api.POST("/sync-pairs/:id/disable", s.disableSyncPair)
+		api.POST("/sync-pairs/:id/reset", s.resetSyncPair)
 		api.GET("/sync-pairs/:id/status", s.syncStatus)
 
 		api.GET("/health", s.health)

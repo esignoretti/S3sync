@@ -116,8 +116,9 @@ async function pollStatus() {
                 </div>
                 <div class="pair-actions">
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
-                    <button class="btn btn-sm ${p.enabled ? 'btn-danger' : 'btn-secondary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Stop' : 'Start'}</button>
+                    <button class="btn btn-sm ${p.enabled ? 'btn-secondary' : 'btn-primary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Pause' : 'Resume'}</button>
                     <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${p.id}">Edit</button>
+                    <button class="btn btn-sm btn-secondary" data-action="reset" data-id="${p.id}">Restart</button>
                     <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
                 </div>
             `;
