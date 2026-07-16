@@ -119,16 +119,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("cache: %w", err)
 	}
 
-	entries := make([]cachedEntry, len(cached))
-	for i, c := range cached {
-		entries[i] = cachedEntry{
-			Key: c.Key, ETag: c.ETag, Size: c.Size,
-			LastModified: c.LastModified,
-			ErrorCount:   c.ErrorCount, LastError: c.LastError,
-		}
-	}
-
-	diff := Diff(listing, entries, e.pair.DeletePropagation)
+	diff := Diff(listing, cached, e.pair.DeletePropagation)
 	slog.Info("diff complete", "pair", e.pair.Name,
 		"new_changed", len(diff.NewOrChanged),
 		"delete", len(diff.ToDelete),
@@ -177,12 +168,6 @@ func (e *Engine) setResult(status, errMsg string) {
 	e.mu.Lock()
 	e.lastStatus = status
 	e.lastError = errMsg
-	e.mu.Unlock()
-}
-
-func (e *Engine) SetRunning(running bool) {
-	e.mu.Lock()
-	e.running = running
 	e.mu.Unlock()
 }
 

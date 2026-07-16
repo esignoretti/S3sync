@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	gosync "sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,8 @@ type Server struct {
 	setupStates map[string]*config.SetupState
 	engines     map[string]*sync.Engine
 	rootCtx     context.Context
+	engineMu    gosync.RWMutex
+	setupMu     gosync.RWMutex
 }
 
 func NewServer(repo *config.Repository, cachePath string) (*Server, error) {
@@ -43,8 +46,55 @@ func (s *Server) SetRootContext(ctx context.Context) {
 	s.rootCtx = ctx
 }
 
-func (s *Server) RegisterEngine(pairID string, e *sync.Engine) {
+func (s *Server) GetEngine(pairID string) (*sync.Engine, bool) {
+	s.engineMu.RLock()
+	defer s.engineMu.RUnlock()
+	e, ok := s.engines[pairID]
+	return e, ok
+}
+
+func (s *Server) SetEngine(pairID string, e *sync.Engine) {
+	s.engineMu.Lock()
+	defer s.engineMu.Unlock()
 	s.engines[pairID] = e
+}
+
+func (s *Server) DeleteEngine(pairID string) {
+	s.engineMu.Lock()
+	defer s.engineMu.Unlock()
+	delete(s.engines, pairID)
+}
+
+func (s *Server) HasEngine(pairID string) bool {
+	s.engineMu.RLock()
+	defer s.engineMu.RUnlock()
+	_, ok := s.engines[pairID]
+	return ok
+}
+
+func (s *Server) GetSetupState(sessionID string) (*config.SetupState, bool) {
+	s.setupMu.RLock()
+	defer s.setupMu.RUnlock()
+	st, ok := s.setupStates[sessionID]
+	return st, ok
+}
+
+func (s *Server) SetSetupState(sessionID string, st *config.SetupState) {
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+	s.setupStates[sessionID] = st
+}
+
+// GetOrCreateSetupState returns the existing state for a session or creates a new one.
+func (s *Server) GetOrCreateSetupState(sessionID string) *config.SetupState {
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+	st, ok := s.setupStates[sessionID]
+	if !ok {
+		st = config.NewSetupState()
+		s.setupStates[sessionID] = st
+	}
+	return st
 }
 
 // createEngine builds an Engine from the pair ID, registers it, and returns it.
@@ -72,14 +122,14 @@ func (s *Server) createEngine(pairID string) (*sync.Engine, error) {
 	}
 
 	engine := sync.NewEngine(pair, src, tgt, srcS3, tgtS3, s.cache)
-	s.RegisterEngine(pairID, engine)
+	s.SetEngine(pairID, engine)
 	return engine, nil
 }
 
 // runPairSync runs one sync cycle for the given pair using the shared cache.
 // Creates and registers an engine if one does not already exist.
 func (s *Server) runPairSync(ctx context.Context, pairID string) error {
-	eng, ok := s.engines[pairID]
+	eng, ok := s.GetEngine(pairID)
 	if !ok {
 		var err error
 		eng, err = s.createEngine(pairID)

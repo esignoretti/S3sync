@@ -1,7 +1,6 @@
 package log
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -38,7 +37,15 @@ func Init(cfg Config) func() {
 	case "json":
 		h = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: lvl})
 	default:
-		h = newTextHandler(w, &slog.HandlerOptions{Level: lvl})
+		h = slog.NewTextHandler(w, &slog.HandlerOptions{
+			Level: lvl,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey && len(groups) == 0 {
+					return slog.String(slog.TimeKey, a.Value.Time().Format("15:04:05"))
+				}
+				return a
+			},
+		})
 	}
 
 	slog.SetDefault(slog.New(h))
@@ -62,52 +69,4 @@ func parseLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
-}
-
-type textHandler struct {
-	opts  slog.HandlerOptions
-	attrs []slog.Attr
-	mu    *sync.Mutex
-	w     io.Writer
-}
-
-func newTextHandler(w io.Writer, opts *slog.HandlerOptions) *textHandler {
-	var o slog.HandlerOptions
-	if opts != nil {
-		o = *opts
-	}
-	return &textHandler{w: w, opts: o, mu: &sync.Mutex{}}
-}
-
-func (h *textHandler) Enabled(_ context.Context, lvl slog.Level) bool {
-	minLevel := slog.LevelInfo
-	if h.opts.Level != nil {
-		minLevel = h.opts.Level.Level()
-	}
-	return lvl >= minLevel
-}
-
-func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	line := r.Time.Format("15:04:05") + " " + r.Level.String() + "\t" + r.Message
-	for _, a := range h.attrs {
-		line += "  " + a.Key + "=" + a.Value.String()
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		line += "  " + a.Key + "=" + a.Value.String()
-		return true
-	})
-	_, err := h.w.Write([]byte(line + "\n"))
-	return err
-}
-
-func (h *textHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	cp := *h
-	cp.attrs = append(append([]slog.Attr(nil), h.attrs...), attrs...)
-	return &cp
-}
-
-func (h *textHandler) WithGroup(string) slog.Handler {
-	return h
 }

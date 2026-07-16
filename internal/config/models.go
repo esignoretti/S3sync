@@ -32,8 +32,6 @@ type SyncPair struct {
 	LastSyncAt         *time.Time `json:"last_sync_at,omitempty"`
 	LastSyncStatus     string     `json:"last_sync_status"`
 	ConsecutiveErrors  int        `json:"consecutive_errors"`
-	LastSyncedObjects  int        `json:"last_synced_objects"`
-	LastTotalObjects   int        `json:"last_total_objects"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 }

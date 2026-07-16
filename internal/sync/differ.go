@@ -1,6 +1,10 @@
 package sync
 
-import "time"
+import (
+	"time"
+
+	"github.com/esignoretti/S3sync/internal/cache"
+)
 
 type ActionType int
 
@@ -17,23 +21,14 @@ type SyncAction struct {
 	LastModified time.Time
 }
 
-type cachedEntry struct {
-	Key          string
-	ETag         string
-	Size         int64
-	LastModified time.Time
-	ErrorCount   int
-	LastError    string
-}
-
 type DiffResult struct {
 	NewOrChanged []SyncAction
 	ToDelete     []SyncAction
 	Skipped      int
 }
 
-func Diff(listing []ListedObject, cached []cachedEntry, deletePropagation bool) DiffResult {
-	cm := make(map[string]cachedEntry, len(cached))
+func Diff(listing []ListedObject, cached []cache.CachedObject, deletePropagation bool) DiffResult {
+	cm := make(map[string]cache.CachedObject, len(cached))
 	for _, c := range cached {
 		cm[c.Key] = c
 	}

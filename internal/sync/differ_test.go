@@ -3,6 +3,8 @@ package sync
 import (
 	"testing"
 	"time"
+
+	"github.com/esignoretti/S3sync/internal/cache"
 )
 
 func TestDiffNew(t *testing.T) {
@@ -16,7 +18,7 @@ func TestDiffNew(t *testing.T) {
 func TestDiffUnchanged(t *testing.T) {
 	tm := time.Now()
 	listing := []ListedObject{{Key: "a.jpg", ETag: `"1"`, LastModified: tm}}
-	cached := []cachedEntry{{Key: "a.jpg", ETag: `"1"`, LastModified: tm}}
+	cached := []cache.CachedObject{{Key: "a.jpg", ETag: `"1"`, LastModified: tm}}
 	result := Diff(listing, cached, false)
 	if result.Skipped != 1 {
 		t.Fatalf("expected 1 skipped, got %d", result.Skipped)
@@ -25,7 +27,7 @@ func TestDiffUnchanged(t *testing.T) {
 
 func TestDiffChanged(t *testing.T) {
 	listing := []ListedObject{{Key: "a.jpg", ETag: `"2"`}}
-	cached := []cachedEntry{{Key: "a.jpg", ETag: `"1"`}}
+	cached := []cache.CachedObject{{Key: "a.jpg", ETag: `"1"`}}
 	result := Diff(listing, cached, false)
 	if len(result.NewOrChanged) != 1 {
 		t.Fatalf("expected 1 changed, got %d", len(result.NewOrChanged))
@@ -34,7 +36,7 @@ func TestDiffChanged(t *testing.T) {
 
 func TestDiffDelete(t *testing.T) {
 	listing := []ListedObject{{Key: "a.jpg"}}
-	cached := []cachedEntry{{Key: "a.jpg"}, {Key: "b.jpg"}}
+	cached := []cache.CachedObject{{Key: "a.jpg"}, {Key: "b.jpg"}}
 	result := Diff(listing, cached, true)
 	if len(result.ToDelete) != 1 || result.ToDelete[0].Key != "b.jpg" {
 		t.Fatal("expected b.jpg to delete")
@@ -43,7 +45,7 @@ func TestDiffDelete(t *testing.T) {
 
 func TestDiffNoDeleteWhenDisabled(t *testing.T) {
 	listing := []ListedObject{{Key: "a.jpg"}}
-	cached := []cachedEntry{{Key: "a.jpg"}, {Key: "b.jpg"}}
+	cached := []cache.CachedObject{{Key: "a.jpg"}, {Key: "b.jpg"}}
 	result := Diff(listing, cached, false)
 	if len(result.ToDelete) != 0 {
 		t.Fatal("expected no deletes")

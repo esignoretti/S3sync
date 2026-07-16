@@ -46,27 +46,6 @@ func (s *Store) Put(obj *CachedObject) error {
 	})
 }
 
-func (s *Store) Get(pairID, key string) (*CachedObject, error) {
-	var obj *CachedObject
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(s.bucket(pairID))
-		if b == nil {
-			return nil
-		}
-		data := b.Get([]byte(key))
-		if data == nil {
-			return nil
-		}
-		var o CachedObject
-		if err := json.Unmarshal(data, &o); err != nil {
-			return err
-		}
-		obj = &o
-		return nil
-	})
-	return obj, err
-}
-
 func (s *Store) Delete(pairID, key string) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(s.bucket(pairID))
@@ -98,14 +77,10 @@ func (s *Store) List(pairID string) ([]CachedObject, error) {
 
 func (s *Store) Clear(pairID string) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		tx.DeleteBucket(s.bucket(pairID))
+		if err := tx.DeleteBucket(s.bucket(pairID)); err != nil {
+			return nil // bucket didn't exist
+		}
 		_, err := tx.CreateBucket(s.bucket(pairID))
 		return err
-	})
-}
-
-func (s *Store) DeletePairBucket(pairID string) error {
-	return s.db.Update(func(tx *bbolt.Tx) error {
-		return tx.DeleteBucket(s.bucket(pairID))
 	})
 }

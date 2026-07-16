@@ -31,13 +31,6 @@ func (t *Throttler) Wait(ctx context.Context) error {
 	return t.limiter.Wait(ctx)
 }
 
-func (t *Throttler) Allow() bool {
-	if !t.enabled {
-		return true
-	}
-	return t.limiter.Allow()
-}
-
 func (t *Throttler) WaitLog(ctx context.Context, label string) error {
 	if !t.enabled {
 		return nil

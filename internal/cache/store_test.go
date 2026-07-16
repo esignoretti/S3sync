@@ -19,20 +19,15 @@ func TestCRUD(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _ := s.Get("p1", "a.jpg")
-	if got == nil || got.ETag != `"abc"` {
-		t.Fatal("expected object")
-	}
-
 	list, _ := s.List("p1")
-	if len(list) != 1 {
-		t.Fatalf("expected 1, got %d", len(list))
+	if len(list) != 1 || list[0].ETag != `"abc"` {
+		t.Fatalf("expected 1 object with etag abc, got %+v", list)
 	}
 
 	s.Delete("p1", "a.jpg")
-	got, _ = s.Get("p1", "a.jpg")
-	if got != nil {
-		t.Fatal("expected nil after delete")
+	list, _ = s.List("p1")
+	if len(list) != 0 {
+		t.Fatal("expected empty after delete")
 	}
 
 	s.Put(&CachedObject{PairID: "p1", Key: "x.jpg"})

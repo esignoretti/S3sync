@@ -138,7 +138,7 @@ func (s *Server) listSyncPairs(c *gin.Context) {
 	resp := make([]syncPairResponse, len(pairs))
 	for i, p := range pairs {
 		r := enrichPair(s.repo, p)
-		if eng, ok := s.engines[p.ID]; ok {
+		if eng, ok := s.GetEngine(p.ID); ok {
 			running, lastRun, status, lastError, prog := eng.Status()
 			r.Running = running
 			r.LastError = lastError
@@ -197,9 +197,9 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 
 func (s *Server) deleteSyncPair(c *gin.Context) {
 	id := c.Param("id")
-	if eng, ok := s.engines[id]; ok {
+	if eng, ok := s.GetEngine(id); ok {
 		eng.Stop()
-		delete(s.engines, id)
+		s.DeleteEngine(id)
 	}
 	if err := s.repo.DeleteSyncPair(id); err != nil {
 		respondError(c, http.StatusNotFound, err.Error())
@@ -218,16 +218,16 @@ func (s *Server) disableSyncPair(c *gin.Context) {
 
 	if p.Enabled {
 		// Start the periodic engine loop if not already running
-		if _, ok := s.engines[p.ID]; !ok {
+		if !s.HasEngine(p.ID) {
 			if err := s.StartEngineLoop(s.rootCtx, *p); err != nil {
 				slog.Error("disableSyncPair: start engine loop", "pair", p.ID, "error", err)
 			}
 		}
 	} else {
 		// Stop the running engine
-		if eng, ok := s.engines[p.ID]; ok {
+		if eng, ok := s.GetEngine(p.ID); ok {
 			eng.Stop()
-			delete(s.engines, p.ID)
+			s.DeleteEngine(p.ID)
 		}
 	}
 
@@ -245,7 +245,7 @@ func (s *Server) triggerSync(c *gin.Context) {
 		if err := s.runPairSync(context.Background(), pairID); err != nil {
 			slog.Warn("trigger sync", "pair", pairID, "error", err)
 		}
-		if eng, ok := s.engines[pairID]; ok {
+		if eng, ok := s.GetEngine(pairID); ok {
 			_, _, status, _, _ := eng.Status()
 			if pair, err := s.repo.GetSyncPair(pairID); err == nil {
 				now := time.Now().UTC()
@@ -267,9 +267,9 @@ func (s *Server) resetSyncPair(c *gin.Context) {
 	id := c.Param("id")
 
 	// Stop engine if running
-	if eng, ok := s.engines[id]; ok {
+	if eng, ok := s.GetEngine(id); ok {
 		eng.Stop()
-		delete(s.engines, id)
+		s.DeleteEngine(id)
 	}
 
 	// Clear cache for this pair
@@ -311,7 +311,7 @@ func (s *Server) syncStatus(c *gin.Context) {
 		"last_sync_at":       p.LastSyncAt,
 		"consecutive_errors": p.ConsecutiveErrors,
 	}
-	if eng, ok := s.engines[c.Param("id")]; ok {
+	if eng, ok := s.GetEngine(c.Param("id")); ok {
 		_, lastRun, status, lastError, prog := eng.Status()
 		if !lastRun.IsZero() {
 			resp["last_sync_at"] = lastRun
@@ -335,11 +335,7 @@ func (s *Server) setup(c *gin.Context) {
 		sessionID = uuid.New().String()
 	}
 
-	state, exists := s.setupStates[sessionID]
-	if !exists {
-		state = config.NewSetupState()
-		s.setupStates[sessionID] = state
-	}
+	state := s.GetOrCreateSetupState(sessionID)
 
 	if err := state.Apply(s.repo, &in); err != nil {
 		state.Error = err.Error()
@@ -362,7 +358,7 @@ func (s *Server) setupState(c *gin.Context) {
 		respondError(c, http.StatusBadRequest, "X-Setup-Session header or ?session= query required")
 		return
 	}
-	state, exists := s.setupStates[sessionID]
+	state, exists := s.GetSetupState(sessionID)
 	if !exists {
 		respondError(c, http.StatusNotFound, "setup session not found")
 		return
