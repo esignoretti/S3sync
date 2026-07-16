@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -65,7 +66,9 @@ func (wp *WorkerPool) Run(ctx context.Context, actions []SyncAction) (int, int) 
 					err = wp.deleteObject(ctx, a)
 				}
 				if err != nil {
-					slog.Error("worker failed", "key", a.Key, "action", a.Type, "error", err)
+					if !errors.Is(err, context.Canceled) {
+						slog.Error("worker failed", "key", a.Key, "action", a.Type, "error", err)
+					}
 				} else {
 					slog.Info("worker done", "key", a.Key, "action", a.Type, "ms", time.Since(start).Milliseconds())
 				}
