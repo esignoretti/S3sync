@@ -9,10 +9,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/esignoretti/bucketsync/internal/cache"
-	"github.com/esignoretti/bucketsync/internal/config"
-	"github.com/esignoretti/bucketsync/internal/s3client"
-	"github.com/esignoretti/bucketsync/internal/sync"
+	"github.com/esignoretti/S3sync/internal/cache"
+	"github.com/esignoretti/S3sync/internal/config"
+	"github.com/esignoretti/S3sync/internal/s3client"
+	"github.com/esignoretti/S3sync/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -130,14 +130,32 @@ var pairUpdateCmd = &cobra.Command{
 			return err
 		}
 
-		if v, _ := cmd.Flags().GetString("name"); v != "" {
+		if v, _ := cmd.Flags().GetString("name"); cmd.Flags().Changed("name") {
 			p.Name = v
 		}
-		if v, _ := cmd.Flags().GetInt("interval"); v != 0 {
+		if v, _ := cmd.Flags().GetString("source-bucket"); cmd.Flags().Changed("source-bucket") {
+			p.SourceBucketID = v
+		}
+		if v, _ := cmd.Flags().GetString("target-bucket"); cmd.Flags().Changed("target-bucket") {
+			p.TargetBucketID = v
+		}
+		if v, _ := cmd.Flags().GetInt("interval"); cmd.Flags().Changed("interval") {
 			p.SyncInterval = v
 		}
-		if v, _ := cmd.Flags().GetInt("workers"); v != 0 {
+		if v, _ := cmd.Flags().GetInt("workers"); cmd.Flags().Changed("workers") {
 			p.WorkerCount = v
+		}
+		if v, _ := cmd.Flags().GetInt("max-ops"); cmd.Flags().Changed("max-ops") {
+			p.MaxGetOpsPerMinute = v
+		}
+		if v, _ := cmd.Flags().GetBool("delete-propagation"); cmd.Flags().Changed("delete-propagation") {
+			p.DeletePropagation = v
+		}
+		if v, _ := cmd.Flags().GetString("storage-class"); cmd.Flags().Changed("storage-class") {
+			p.TargetStorageClass = v
+		}
+		if v, _ := cmd.Flags().GetBool("enabled"); cmd.Flags().Changed("enabled") {
+			p.Enabled = v
 		}
 
 		return repo.UpdateSyncPair(p)
@@ -234,8 +252,14 @@ func init() {
 	pairAddCmd.Flags().String("storage-class", "", "Target storage class override")
 
 	pairUpdateCmd.Flags().String("name", "", "New name")
+	pairUpdateCmd.Flags().String("source-bucket", "", "New source bucket ID")
+	pairUpdateCmd.Flags().String("target-bucket", "", "New target bucket ID")
 	pairUpdateCmd.Flags().Int("interval", 0, "New sync interval")
 	pairUpdateCmd.Flags().Int("workers", 0, "New worker count")
+	pairUpdateCmd.Flags().Int("max-ops", 0, "New max GET ops per minute")
+	pairUpdateCmd.Flags().Bool("delete-propagation", true, "Enable delete propagation")
+	pairUpdateCmd.Flags().String("storage-class", "", "New target storage class")
+	pairUpdateCmd.Flags().Bool("enabled", true, "Enable sync pair")
 
 	pairCmd.AddCommand(pairAddCmd, pairListCmd, pairGetCmd, pairUpdateCmd, pairDeleteCmd, pairSyncCmd)
 	rootCmd.AddCommand(pairCmd)

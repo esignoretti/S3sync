@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/esignoretti/bucketsync/internal/cache"
-	"github.com/esignoretti/bucketsync/internal/config"
+	"github.com/esignoretti/S3sync/internal/cache"
+	"github.com/esignoretti/S3sync/internal/config"
 )
 
 type Engine struct {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 
+	"github.com/esignoretti/S3sync/internal/log"
 	"github.com/spf13/cobra"
 )
 
@@ -10,6 +11,17 @@ var rootCmd = &cobra.Command{
 	Use:   "bucketsync",
 	Short: "Keep S3 buckets in sync, one-way",
 	Long:  `BucketSync — one-way S3 bucket sync with CLI, API, and web UI.`,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		level, _ := cmd.Flags().GetString("log-level")
+		format, _ := cmd.Flags().GetString("log-format")
+		file, _ := cmd.Flags().GetString("log-file")
+		log.Init(log.Config{
+			Level:  level,
+			Format: format,
+			File:   file,
+		})
+		return nil
+	},
 }
 
 func Execute() {

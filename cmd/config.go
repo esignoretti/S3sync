@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/esignoretti/bucketsync/internal/config"
+	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/spf13/cobra"
 )
 

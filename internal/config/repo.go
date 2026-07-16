@@ -3,17 +3,23 @@ package config
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 type Repository struct {
-	db *sql.DB
+	db  *sql.DB
+	key []byte // AES-256 key for credential encryption (nil = no encryption)
 }
 
 func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+	r := &Repository{db: db}
+	if mk := os.Getenv("BUCKETSYNC_MASTER_KEY"); mk != "" {
+		r.key = DeriveKey([]byte(mk))
+	}
+	return r
 }
 
 // --- Buckets ---
@@ -23,11 +29,25 @@ func (r *Repository) CreateBucket(b *Bucket) error {
 	now := time.Now().UTC()
 	b.CreatedAt = now
 	b.UpdatedAt = now
+
+	ak, sk := b.AccessKey, b.SecretKey
+	if r.key != nil {
+		encAK, err := Encrypt([]byte(b.AccessKey), r.key)
+		if err != nil {
+			return fmt.Errorf("encrypt access key: %w", err)
+		}
+		encSK, err := Encrypt([]byte(b.SecretKey), r.key)
+		if err != nil {
+			return fmt.Errorf("encrypt secret key: %w", err)
+		}
+		ak, sk = encAK, encSK
+	}
+
 	_, err := r.db.Exec(
 		`INSERT INTO buckets (id,name,endpoint,region,access_key,secret_key,bucket_name,
 		 object_lock,versioning,retention_mode,retention_days,created_at,updated_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.Name, b.Endpoint, b.Region, b.AccessKey, b.SecretKey, b.BucketName,
+		b.ID, b.Name, b.Endpoint, b.Region, ak, sk, b.BucketName,
 		boolInt(b.ObjectLock), boolInt(b.Versioning),
 		nullStr(b.RetentionMode), nullInt(b.RetentionDays),
 		rfc(b.CreatedAt), rfc(b.UpdatedAt),
@@ -41,21 +61,47 @@ func (r *Repository) ListBuckets() ([]Bucket, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanBuckets(rows)
+	out, err := scanBuckets(rows)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		decryptCreds(r.key, &out[i])
+	}
+	return out, nil
 }
 
 func (r *Repository) GetBucket(id string) (*Bucket, error) {
 	row := r.db.QueryRow(`SELECT id,name,endpoint,region,access_key,secret_key,bucket_name,object_lock,versioning,retention_mode,retention_days,created_at,updated_at FROM buckets WHERE id = ?`, id)
-	return scanBucket(row)
+	b, err := scanBucket(row)
+	if err != nil {
+		return nil, err
+	}
+	decryptCreds(r.key, b)
+	return b, nil
 }
 
 func (r *Repository) UpdateBucket(b *Bucket) error {
 	b.UpdatedAt = time.Now().UTC()
+
+	ak, sk := b.AccessKey, b.SecretKey
+	if r.key != nil {
+		encAK, err := Encrypt([]byte(b.AccessKey), r.key)
+		if err != nil {
+			return fmt.Errorf("encrypt access key: %w", err)
+		}
+		encSK, err := Encrypt([]byte(b.SecretKey), r.key)
+		if err != nil {
+			return fmt.Errorf("encrypt secret key: %w", err)
+		}
+		ak, sk = encAK, encSK
+	}
+
 	res, err := r.db.Exec(
 		`UPDATE buckets SET name=?,endpoint=?,region=?,access_key=?,secret_key=?,
 		 bucket_name=?,object_lock=?,versioning=?,retention_mode=?,retention_days=?,
 		 updated_at=? WHERE id=?`,
-		b.Name, b.Endpoint, b.Region, b.AccessKey, b.SecretKey, b.BucketName,
+		b.Name, b.Endpoint, b.Region, ak, sk, b.BucketName,
 		boolInt(b.ObjectLock), boolInt(b.Versioning),
 		nullStr(b.RetentionMode), nullInt(b.RetentionDays),
 		rfc(b.UpdatedAt), b.ID,
@@ -269,4 +315,20 @@ func nullTimeRFC(t *time.Time) *string {
 
 func rfc(t time.Time) string {
 	return t.Format(time.RFC3339)
+}
+
+func decryptCreds(key []byte, b *Bucket) {
+	if key == nil {
+		return
+	}
+	if b.AccessKey != "" {
+		if d, err := Decrypt(b.AccessKey, key); err == nil {
+			b.AccessKey = string(d)
+		}
+	}
+	if b.SecretKey != "" {
+		if d, err := Decrypt(b.SecretKey, key); err == nil {
+			b.SecretKey = string(d)
+		}
+	}
 }

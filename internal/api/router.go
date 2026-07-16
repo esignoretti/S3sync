@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/esignoretti/bucketsync/internal/config"
+	"github.com/esignoretti/S3sync/internal/config"
 )
 
 type Server struct {

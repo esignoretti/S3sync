@@ -8,7 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	bucketc "github.com/esignoretti/bucketsync/internal/config"
+	bucketc "github.com/esignoretti/S3sync/internal/config"
 )
 
 func NewClient(b *bucketc.Bucket) (*s3.Client, error) {

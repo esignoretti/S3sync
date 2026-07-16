@@ -1,4 +1,4 @@
-/bucketsync
+/s3sync
 *.db
 *.db-wal
 *.db-shm

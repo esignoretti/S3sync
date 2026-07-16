@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/esignoretti/bucketsync/internal/api"
-	"github.com/esignoretti/bucketsync/internal/config"
+	"github.com/esignoretti/S3sync/internal/api"
+	"github.com/esignoretti/S3sync/internal/config"
 )
 
 func jsonBody(s string) *strings.Reader {

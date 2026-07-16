@@ -1,4 +1,4 @@
-module github.com/esignoretti/bucketsync
+module github.com/esignoretti/S3sync
 
 go 1.26.4
 

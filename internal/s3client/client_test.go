@@ -3,7 +3,7 @@ package s3client
 import (
 	"testing"
 
-	"github.com/esignoretti/bucketsync/internal/config"
+	"github.com/esignoretti/S3sync/internal/config"
 )
 
 func TestNewClient(t *testing.T) {

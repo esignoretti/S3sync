@@ -6,7 +6,7 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/esignoretti/bucketsync/internal/config"
+	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -113,11 +113,35 @@ var bucketUpdateCmd = &cobra.Command{
 			return err
 		}
 
-		if v, _ := cmd.Flags().GetString("name"); v != "" {
+		if v, _ := cmd.Flags().GetString("name"); cmd.Flags().Changed("name") {
 			b.Name = v
 		}
-		if v, _ := cmd.Flags().GetString("endpoint"); v != "" {
+		if v, _ := cmd.Flags().GetString("endpoint"); cmd.Flags().Changed("endpoint") {
 			b.Endpoint = v
+		}
+		if v, _ := cmd.Flags().GetString("region"); cmd.Flags().Changed("region") {
+			b.Region = v
+		}
+		if v, _ := cmd.Flags().GetString("bucket-name"); cmd.Flags().Changed("bucket-name") {
+			b.BucketName = v
+		}
+		if v, _ := cmd.Flags().GetString("access-key"); cmd.Flags().Changed("access-key") {
+			b.AccessKey = v
+		}
+		if v, _ := cmd.Flags().GetString("secret-key"); cmd.Flags().Changed("secret-key") {
+			b.SecretKey = v
+		}
+		if v, _ := cmd.Flags().GetBool("object-lock"); cmd.Flags().Changed("object-lock") {
+			b.ObjectLock = v
+		}
+		if v, _ := cmd.Flags().GetBool("versioning"); cmd.Flags().Changed("versioning") {
+			b.Versioning = v
+		}
+		if v, _ := cmd.Flags().GetString("retention-mode"); cmd.Flags().Changed("retention-mode") {
+			b.RetentionMode = v
+		}
+		if v, _ := cmd.Flags().GetInt("retention-days"); cmd.Flags().Changed("retention-days") {
+			b.RetentionDays = v
 		}
 
 		return repo.UpdateBucket(b)
@@ -151,6 +175,14 @@ func init() {
 
 	bucketUpdateCmd.Flags().String("name", "", "New name")
 	bucketUpdateCmd.Flags().String("endpoint", "", "New endpoint")
+	bucketUpdateCmd.Flags().String("region", "", "New region")
+	bucketUpdateCmd.Flags().String("bucket-name", "", "New bucket name on S3")
+	bucketUpdateCmd.Flags().String("access-key", "", "New access key")
+	bucketUpdateCmd.Flags().String("secret-key", "", "New secret key")
+	bucketUpdateCmd.Flags().Bool("object-lock", false, "Enable object lock")
+	bucketUpdateCmd.Flags().Bool("versioning", false, "Enable versioning")
+	bucketUpdateCmd.Flags().String("retention-mode", "", "GOVERNANCE or COMPLIANCE")
+	bucketUpdateCmd.Flags().Int("retention-days", 0, "Retention period in days")
 
 	bucketCmd.AddCommand(bucketAddCmd, bucketListCmd, bucketGetCmd, bucketUpdateCmd, bucketDeleteCmd)
 	rootCmd.AddCommand(bucketCmd)
