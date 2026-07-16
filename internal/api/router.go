@@ -8,11 +8,12 @@ import (
 )
 
 type Server struct {
-	repo *config.Repository
+	repo        *config.Repository
+	setupStates map[string]*config.SetupState
 }
 
 func NewServer(repo *config.Repository) *Server {
-	return &Server{repo: repo}
+	return &Server{repo: repo, setupStates: make(map[string]*config.SetupState)}
 }
 
 func (s *Server) Router() *gin.Engine {
@@ -36,9 +37,14 @@ func (s *Server) Router() *gin.Engine {
 
 		api.GET("/health", s.health)
 		api.GET("/version", s.version)
+
+		// Setup wizard
+		api.POST("/setup", s.setup)
+		api.GET("/setup", s.setupState)
 	}
 
-	r.GET("/", s.serveWeb)
+	r.GET("/", s.serveDashboard)
+	r.GET("/setup", s.serveSetup)
 	r.StaticFS("/static", http.FS(webStatic))
 
 	return r

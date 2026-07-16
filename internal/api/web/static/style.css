@@ -111,3 +111,40 @@ body {
 
 .stat-label { color: var(--text-muted); }
 .stat-value { color: var(--text); font-family: 'SF Mono', Monaco, monospace; }
+
+/* Form styles */
+.card { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 24px; margin-bottom: 16px; }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
+.form-group input, .form-group select {
+    width: 100%; padding: 8px 12px; background: var(--surface-3); border: 1px solid var(--hairline);
+    border-radius: 6px; color: var(--text); font-size: 14px; outline: none;
+}
+.form-group input:focus, .form-group select:focus { border-color: var(--blue); }
+.form-group.checkbox label { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; cursor: pointer; }
+.form-group.checkbox input { width: auto; }
+.form-actions { display: flex; gap: 12px; margin-top: 24px; }
+.btn {
+    padding: 8px 20px; border-radius: 6px; font-size: 14px; font-weight: 600;
+    border: none; cursor: pointer; text-decoration: none; display: inline-block;
+}
+.btn-primary { background: var(--blue); color: white; }
+.btn-primary:hover { background: var(--blue-hover); }
+.btn-secondary { background: var(--surface-3); color: var(--text); border: 1px solid var(--hairline); }
+.btn-secondary:hover { background: var(--surface-2); }
+
+/* Setup progress */
+.setup-progress { display: flex; gap: 0; margin-bottom: 32px; border-radius: 8px; overflow: hidden; border: 1px solid var(--hairline); }
+.progress-step { flex: 1; text-align: center; padding: 12px; font-size: 13px; font-weight: 600; background: var(--surface-2); color: var(--text-muted); }
+.progress-step.active { background: var(--blue); color: white; }
+.progress-step:not(:last-child) { border-right: 1px solid var(--hairline); }
+.setup-error { margin-top: 16px; padding: 12px; background: rgba(246, 70, 93, 0.1); border: 1px solid var(--red); border-radius: 6px; color: var(--red); font-size: 14px; }
+.setup-done { text-align: center; padding: 48px 24px; }
+.setup-done h2 { font-size: 24px; margin-bottom: 12px; }
+.setup-done p { margin-bottom: 24px; color: var(--grey-light); }
+.empty-state { text-align: center; padding: 48px 24px; color: var(--text-muted); }
+.empty-state p { margin-bottom: 16px; }
+
+/* Nav brand link */
+.nav-brand a { color: var(--blue); text-decoration: none; }
+

@@ -28,8 +28,16 @@ func init() {
 	webStatic = staticSub
 }
 
-func (s *Server) serveWeb(c *gin.Context) {
+func (s *Server) serveDashboard(c *gin.Context) {
 	webTemplates.ExecuteTemplate(c.Writer, "layout.html", gin.H{
-		"title": "S3sync",
+		"title": "S3sync — Dashboard",
+		"page":  "dashboard",
+	})
+}
+
+func (s *Server) serveSetup(c *gin.Context) {
+	webTemplates.ExecuteTemplate(c.Writer, "layout.html", gin.H{
+		"title": "S3sync — Setup",
+		"page":  "setup",
 	})
 }

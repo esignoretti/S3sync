@@ -1,0 +1,79 @@
+{{define "content"}}
+<div class="setup" x-data="setupWizard()">
+    <h1 class="page-title">Setup Wizard</h1>
+
+    <div class="setup-progress">
+        <div class="progress-step" :class="step >= 1 ? 'active' : ''">1. Source</div>
+        <div class="progress-step" :class="step >= 2 ? 'active' : ''">2. Target</div>
+        <div class="progress-step" :class="step >= 3 ? 'active' : ''">3. Sync</div>
+    </div>
+
+    <template x-if="step === 1">
+        <div class="setup-form card">
+            <h2>Source Bucket</h2>
+            <div class="form-group"><label>Config name</label><input x-model="f.name" placeholder="prod-source"></div>
+            <div class="form-group"><label>S3 endpoint URL</label><input x-model="f.endpoint" placeholder="https://s3.amazonaws.com"></div>
+            <div class="form-group"><label>Region</label><input x-model="f.region" placeholder="us-east-1"></div>
+            <div class="form-group"><label>Bucket name</label><input x-model="f.bucket_name" placeholder="my-data"></div>
+            <div class="form-group"><label>Access key</label><input x-model="f.access_key" type="password"></div>
+            <div class="form-group"><label>Secret key</label><input x-model="f.secret_key" type="password"></div>
+            <button class="btn btn-primary" @click="submit('source')">Next</button>
+        </div>
+    </template>
+
+    <template x-if="step === 2">
+        <div class="setup-form card">
+            <h2>Target Bucket</h2>
+            <div class="form-group"><label>Config name</label><input x-model="f.name" placeholder="prod-target"></div>
+            <div class="form-group"><label>S3 endpoint URL</label><input x-model="f.endpoint" placeholder="https://s3.amazonaws.com"></div>
+            <div class="form-group"><label>Region</label><input x-model="f.region" placeholder="us-east-1"></div>
+            <div class="form-group"><label>Bucket name</label><input x-model="f.bucket_name" placeholder="my-data-replica"></div>
+            <div class="form-group"><label>Access key</label><input x-model="f.access_key" type="password"></div>
+            <div class="form-group"><label>Secret key</label><input x-model="f.secret_key" type="password"></div>
+            <div class="form-group checkbox"><label><input x-model="f.versioning" type="checkbox"> Versioning</label></div>
+            <template x-if="f.versioning">
+                <div class="form-group checkbox"><label><input x-model="f.object_lock" type="checkbox"> Object lock</label></div>
+            </template>
+            <template x-if="f.object_lock">
+                <div>
+                    <div class="form-group">
+                        <label>Retention mode</label>
+                        <select x-model="f.retention_mode"><option value="GOVERNANCE">GOVERNANCE</option><option value="COMPLIANCE">COMPLIANCE</option></select>
+                    </div>
+                    <div class="form-group"><label>Retention days</label><input x-model="f.retention_days" type="number"></div>
+                </div>
+            </template>
+            <div class="form-actions">
+                <button class="btn btn-secondary" @click="step=1">Back</button>
+                <button class="btn btn-primary" @click="submit('target')">Next</button>
+            </div>
+        </div>
+    </template>
+
+    <template x-if="step === 3">
+        <div class="setup-form card">
+            <h2>Sync Pair</h2>
+            <div class="form-group"><label>Pair name</label><input x-model="f.pair_name" placeholder="prod-sync"></div>
+            <div class="form-group"><label>Interval (seconds)</label><input x-model="f.sync_interval" type="number" value="300"></div>
+            <div class="form-group"><label>Workers</label><input x-model="f.worker_count" type="number" value="10"></div>
+            <div class="form-group"><label>Max GET ops/min</label><input x-model="f.max_get_ops_per_minute" type="number" value="600"></div>
+            <div class="form-group checkbox"><label><input x-model="f.delete_propagation" type="checkbox"> Delete propagation</label></div>
+            <div class="form-group"><label>Storage class (opt)</label><input x-model="f.target_storage_class" placeholder="STANDARD_IA"></div>
+            <div class="form-actions">
+                <button class="btn btn-secondary" @click="step=2">Back</button>
+                <button class="btn btn-primary" @click="submit('pair')">Complete</button>
+            </div>
+        </div>
+    </template>
+
+    <template x-if="step === 4">
+        <div class="setup-done card">
+            <h2>Setup Complete</h2>
+            <p>Sync pair is ready.</p>
+            <a href="/" class="btn btn-primary">Dashboard</a>
+        </div>
+    </template>
+
+    <div class="setup-error" x-text="error" x-show="error"></div>
+</div>
+{{end}}

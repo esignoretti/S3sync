@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/esignoretti/S3sync/internal/config"
 )
 
@@ -142,6 +143,59 @@ func (s *Server) triggerSync(c *gin.Context) {
 
 func (s *Server) syncStatus(c *gin.Context) {
 	respond(c, http.StatusOK, gin.H{"status": "idle"})
+}
+
+func (s *Server) setup(c *gin.Context) {
+	var in config.SetupInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	sessionID := c.GetHeader("X-Setup-Session")
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+	}
+
+	state, exists := s.setupStates[sessionID]
+	if !exists {
+		state = config.NewSetupState()
+		s.setupStates[sessionID] = state
+	}
+
+	if err := state.Apply(s.repo, &in); err != nil {
+		state.Error = err.Error()
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	state.Error = ""
+	respond(c, http.StatusOK, gin.H{
+		"session":    sessionID,
+		"step":       state.Step.String(),
+		"step_num":   int(state.Step),
+		"done":       state.Step >= config.StepDone,
+		"error":      state.Error,
+	})
+}
+
+func (s *Server) setupState(c *gin.Context) {
+	sessionID := c.Query("session")
+	if sessionID == "" {
+		respondError(c, http.StatusBadRequest, "X-Setup-Session header or ?session= query required")
+		return
+	}
+	state, exists := s.setupStates[sessionID]
+	if !exists {
+		respondError(c, http.StatusNotFound, "setup session not found")
+		return
+	}
+	respond(c, http.StatusOK, gin.H{
+		"session":  sessionID,
+		"step":     state.Step.String(),
+		"step_num": int(state.Step),
+		"done":     state.Step >= config.StepDone,
+	})
 }
 
 func (s *Server) health(c *gin.Context) {
