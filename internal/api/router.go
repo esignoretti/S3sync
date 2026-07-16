@@ -16,7 +16,6 @@ import (
 
 type Server struct {
 	repo        *config.Repository
-	cachePath   string
 	cache       *cache.Store
 	setupStates map[string]*config.SetupState
 	engines     map[string]*sync.Engine
@@ -30,7 +29,6 @@ func NewServer(repo *config.Repository, cachePath string) (*Server, error) {
 	}
 	return &Server{
 		repo:        repo,
-		cachePath:   cachePath,
 		cache:       c,
 		setupStates: make(map[string]*config.SetupState),
 		engines:     make(map[string]*sync.Engine),
@@ -49,28 +47,56 @@ func (s *Server) RegisterEngine(pairID string, e *sync.Engine) {
 	s.engines[pairID] = e
 }
 
-// StartEngineLoop creates an engine for the given pair and runs its
-// periodic-sync loop until the pair is disabled or ctx is cancelled.
-func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
-	src, err := s.repo.GetBucket(p.SourceBucketID)
+// createEngine builds an Engine from the pair ID, registers it, and returns it.
+// Returns an error if bucket config or S3 client creation fails.
+func (s *Server) createEngine(pairID string) (*sync.Engine, error) {
+	pair, err := s.repo.GetSyncPair(pairID)
 	if err != nil {
-		return fmt.Errorf("get source bucket: %w", err)
+		return nil, fmt.Errorf("get pair: %w", err)
 	}
-	tgt, err := s.repo.GetBucket(p.TargetBucketID)
+	src, err := s.repo.GetBucket(pair.SourceBucketID)
 	if err != nil {
-		return fmt.Errorf("get target bucket: %w", err)
+		return nil, fmt.Errorf("get source bucket: %w", err)
+	}
+	tgt, err := s.repo.GetBucket(pair.TargetBucketID)
+	if err != nil {
+		return nil, fmt.Errorf("get target bucket: %w", err)
 	}
 	srcS3, err := s3client.NewClient(src)
 	if err != nil {
-		return fmt.Errorf("create s3 client for source: %w", err)
+		return nil, fmt.Errorf("create s3 client for source: %w", err)
 	}
 	tgtS3, err := s3client.NewClient(tgt)
 	if err != nil {
-		return fmt.Errorf("create s3 client for target: %w", err)
+		return nil, fmt.Errorf("create s3 client for target: %w", err)
 	}
 
-	engine := sync.NewEngine(&p, src, tgt, srcS3, tgtS3, s.cache)
-	s.RegisterEngine(p.ID, engine)
+	engine := sync.NewEngine(pair, src, tgt, srcS3, tgtS3, s.cache)
+	s.RegisterEngine(pairID, engine)
+	return engine, nil
+}
+
+// runPairSync runs one sync cycle for the given pair using the shared cache.
+// Creates and registers an engine if one does not already exist.
+func (s *Server) runPairSync(ctx context.Context, pairID string) error {
+	eng, ok := s.engines[pairID]
+	if !ok {
+		var err error
+		eng, err = s.createEngine(pairID)
+		if err != nil {
+			return fmt.Errorf("create engine: %w", err)
+		}
+	}
+	return eng.RunOnce(ctx)
+}
+
+// StartEngineLoop creates an engine for the given pair and runs its
+// periodic-sync loop until the pair is disabled or ctx is cancelled.
+func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
+	engine, err := s.createEngine(p.ID)
+	if err != nil {
+		return fmt.Errorf("create engine: %w", err)
+	}
 
 	ticker := time.NewTicker(time.Duration(p.SyncInterval) * time.Second)
 	slog.Info("engine loop started", "pair", p.Name, "interval", p.SyncInterval)

@@ -218,14 +218,13 @@ func (s *Server) disableSyncPair(c *gin.Context) {
 func (s *Server) triggerSync(c *gin.Context) {
 	pairID := c.Param("id")
 
-	if eng, ok := s.engines[pairID]; ok {
-		go func() {
-			if err := eng.RunOnce(context.Background()); err != nil {
-				slog.Warn("trigger sync", "pair", pairID, "error", err)
-			}
+	go func() {
+		if err := s.runPairSync(context.Background(), pairID); err != nil {
+			slog.Warn("trigger sync", "pair", pairID, "error", err)
+		}
+		if eng, ok := s.engines[pairID]; ok {
 			_, _, status, _, _ := eng.Status()
-			pair, err := s.repo.GetSyncPair(pairID)
-			if err == nil {
+			if pair, err := s.repo.GetSyncPair(pairID); err == nil {
 				now := time.Now().UTC()
 				pair.LastSyncAt = &now
 				pair.LastSyncStatus = status
@@ -236,14 +235,6 @@ func (s *Server) triggerSync(c *gin.Context) {
 				}
 				s.repo.UpdateSyncPair(pair)
 			}
-		}()
-		respond(c, http.StatusAccepted, gin.H{"message": "sync triggered"})
-		return
-	}
-
-	go func() {
-		if err := sync.RunOneShot(context.Background(), s.repo, pairID, s.cachePath); err != nil {
-			slog.Warn("trigger sync", "pair", pairID, "error", err)
 		}
 	}()
 	respond(c, http.StatusAccepted, gin.H{"message": "sync triggered"})
