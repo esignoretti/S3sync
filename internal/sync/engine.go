@@ -27,6 +27,8 @@ type Engine struct {
 	running    bool
 	lastRun    time.Time
 	lastStatus string
+
+	setupOnce sync.Once
 }
 
 func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
@@ -63,6 +65,18 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}()
 
 	slog.Info("sync start", "pair", e.pair.Name)
+
+	e.setupOnce.Do(func() {
+		if err := SetupTargetBucket(ctx, e.tgtS3, e.src.Region, TargetConfig{
+			BucketName:    e.tgt.BucketName,
+			Versioning:    e.tgt.Versioning,
+			ObjectLock:    e.tgt.ObjectLock,
+			RetentionMode: e.tgt.RetentionMode,
+			RetentionDays: e.tgt.RetentionDays,
+		}); err != nil {
+			slog.Warn("target bucket setup", "pair", e.pair.Name, "error", err)
+		}
+	})
 
 	listing, err := e.lister.List(ctx)
 	if err != nil {
