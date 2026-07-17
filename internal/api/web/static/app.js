@@ -93,13 +93,20 @@ async function pollStatus() {
             let prog = p.progress || {};
             let pct = prog.total > 0 ? Math.round(prog.completed / prog.total * 100) : 0;
             let progressHTML = '';
-            if (prog.total > 0) {
-                if (p.running) statusClass = 'running';
-                progressHTML = `<div class="sync-progress ${p.running ? 'running' : 'synced'}"><div class="sync-bar" style="width:${pct}%"></div></div>
+            if (p.running) {
+                statusClass = 'running';
+                if (prog.total > 0) {
+                    progressHTML = `<div class="sync-progress running"><div class="sync-bar" style="width:${pct}%"></div></div>
+                        <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${prog.completed}/${prog.total} (${pct}%)</span></div>`;
+                } else {
+                    progressHTML = `<div class="sync-progress running"><div class="sync-bar"></div></div><div class="stat"><span class="stat-label">Progress</span><span class="stat-value">scanning...</span></div>`;
+                }
+            } else if (prog.total > 0) {
+                progressHTML = `<div class="sync-progress synced"><div class="sync-bar" style="width:${pct}%"></div></div>
                     <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${prog.completed}/${prog.total} (${pct}%)</span></div>`;
             } else if (p.last_error) {
                 progressHTML = `<div class="stat error-detail"><span class="stat-label">Error</span><span class="stat-value">${p.last_error}</span></div>`;
-            } else if (!p.running) {
+            } else {
                 progressHTML = `<div class="sync-progress idle"><div class="sync-bar"></div></div>`;
             }
             card.innerHTML = `
