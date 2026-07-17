@@ -100,46 +100,87 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	if err := wp.throttler.WaitLog(reqCtx, wp.sourceBucket); err != nil {
-		return err
-	}
-
-	headOut, err := wp.client.HeadObject(reqCtx, &s3.HeadObjectInput{
-		Bucket: &wp.targetBucket, Key: &a.Key,
-	})
-	if err == nil {
-		if aws.ToString(headOut.ETag) == a.ETag {
-			slog.Debug("skip unchanged", "key", a.Key)
-			return nil
-		}
-	}
-
-	if err := wp.throttler.WaitLog(reqCtx, wp.sourceBucket); err != nil {
-		return err
-	}
-
 	src := fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)
-	input := &s3.CopyObjectInput{
-		Bucket:     &wp.targetBucket,
-		CopySource: &src,
-		Key:        &a.Key,
+	needCopy := true
+	err := retryS3(reqCtx, "HeadObject", func(c context.Context) error {
+		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+			return err
+		}
+		headOut, err := wp.client.HeadObject(c, &s3.HeadObjectInput{
+			Bucket: &wp.targetBucket, Key: &a.Key,
+		})
+		if err != nil {
+			return err
+		}
+		if aws.ToString(headOut.ETag) == a.ETag {
+			needCopy = false
+		}
+		return nil
+	}, 3)
+	if err != nil {
+		return err
 	}
-	if wp.storageClass != "" {
-		input.StorageClass = types.StorageClass(wp.storageClass)
+	if !needCopy {
+		slog.Debug("skip unchanged", "key", a.Key)
+		return nil
 	}
 
-	_, err = wp.client.CopyObject(reqCtx, input)
-	return err
+	return retryS3(reqCtx, "CopyObject", func(c context.Context) error {
+		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+			return err
+		}
+		output := &s3.CopyObjectInput{
+			Bucket:     &wp.targetBucket,
+			CopySource: &src,
+			Key:        &a.Key,
+		}
+		if wp.storageClass != "" {
+			output.StorageClass = types.StorageClass(wp.storageClass)
+		}
+		_, err := wp.client.CopyObject(c, output)
+		return err
+	}, 3)
 }
 
 func (wp *WorkerPool) deleteObject(ctx context.Context, a SyncAction) error {
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := wp.throttler.WaitLog(reqCtx, wp.sourceBucket); err != nil {
+	return retryS3(reqCtx, "DeleteObject", func(c context.Context) error {
+		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+			return err
+		}
+		_, err := wp.client.DeleteObject(c, &s3.DeleteObjectInput{
+			Bucket: &wp.targetBucket, Key: &a.Key,
+		})
 		return err
+	}, 3)
+}
+
+func retryS3(ctx context.Context, label string, fn func(context.Context) error, maxAttempts int) error {
+	var err error
+	delay := time.Second
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			slog.Debug("retry", "label", label, "attempt", attempt, "delay_ms", delay.Milliseconds())
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
+			delay *= 2
+		}
+		err = fn(ctx)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if attempt < maxAttempts {
+			slog.Warn("s3 call failed, retrying", "label", label, "attempt", attempt, "max", maxAttempts, "error", err)
+		}
 	}
-	_, err := wp.client.DeleteObject(reqCtx, &s3.DeleteObjectInput{
-		Bucket: &wp.targetBucket, Key: &a.Key,
-	})
-	return err
+	return fmt.Errorf("%s failed after %d attempts: %w", label, maxAttempts, err)
 }
