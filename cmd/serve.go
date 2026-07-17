@@ -56,14 +56,20 @@ var serveCmd = &cobra.Command{
 		}
 
 		slog.Info("server starting", "port", port)
-		httpSrv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: srv.Router()}
+		httpSrv := &http.Server{
+			Addr:        fmt.Sprintf(":%d", port),
+			Handler:     srv.Router(),
+			IdleTimeout: 5 * time.Second,
+		}
 
 		go func() {
 			<-ctx.Done()
 			slog.Info("shutting down")
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			httpSrv.SetKeepAlivesEnabled(false)
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer shutdownCancel()
 			httpSrv.Shutdown(shutdownCtx)
+			httpSrv.Close()
 		}()
 
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
