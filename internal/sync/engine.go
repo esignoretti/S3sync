@@ -173,11 +173,6 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		return diffErr
 	}
 
-	totalActions := succeededCount + failed
-	e.mu.Lock()
-	e.progress.Total = totalActions
-	e.mu.Unlock()
-
 	now := time.Now().UTC()
 	for _, a := range succeeded {
 		if err := e.store.Put(&cache.CachedObject{
