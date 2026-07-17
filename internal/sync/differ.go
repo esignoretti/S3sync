@@ -36,61 +36,90 @@ func StreamingDiff(
 ) error {
 	defer close(actions)
 
-	var token *string
-	var pageObjs []s3types.Object
-	var pageIdx int
-	var lastPage bool
-	var listDone bool
-	var prevToken string
-	var seenMaxKey string
-	var pageCount int
+	type fetchedPage struct {
+		objs []s3types.Object
+		last bool
+	}
 
-	nextListObj := func() (*s3types.Object, bool) {
-		if listDone {
-			return nil, false
-		}
-		for pageIdx >= len(pageObjs) {
-			pageCount++
-			if pageCount > 100000 {
-				return nil, false
-			}
+	pages := make(chan fetchedPage, 2)
+	errCh := make(chan error, 1)
+
+	// Background page fetcher
+	go func() {
+		defer close(pages)
+		var token *string
+		var prevToken string
+		var seenMaxKey string
+		for {
 			out, err := listPage(ctx, token)
 			if err != nil {
-				return nil, false
+				errCh <- err
+				return
 			}
-			pageObjs = out.Contents
-			pageIdx = 0
-
+			if len(out.Contents) == 0 {
+				return
+			}
 			isTruncated := out.IsTruncated != nil && *out.IsTruncated
 			nextToken := ""
 			if out.NextContinuationToken != nil {
 				nextToken = *out.NextContinuationToken
 			}
-
-			if len(pageObjs) == 0 {
-				return nil, false
-			}
-
-			if !isTruncated || nextToken == "" || len(pageObjs) < maxS3Keys {
-				lastPage = true
-			}
+			last := !isTruncated || nextToken == "" || len(out.Contents) < maxS3Keys
 			if nextToken != "" && nextToken == prevToken {
-				lastPage = true
+				last = true
 			}
-			firstKey := aws.ToString(pageObjs[0].Key)
+			firstKey := aws.ToString(out.Contents[0].Key)
 			if seenMaxKey != "" && firstKey <= seenMaxKey {
-				lastPage = true
+				last = true
 			}
-			lastKey := aws.ToString(pageObjs[len(pageObjs)-1].Key)
-			if lastKey > seenMaxKey {
+			if lastKey := aws.ToString(out.Contents[len(out.Contents)-1].Key); lastKey > seenMaxKey {
 				seenMaxKey = lastKey
 			}
 			prevToken = nextToken
+			pages <- fetchedPage{objs: out.Contents, last: last}
 			token = out.NextContinuationToken
+			if last {
+				return
+			}
 		}
-		obj := pageObjs[pageIdx]
+	}()
+
+	// Check for initial fetch error
+	select {
+	case err := <-errCh:
+		return err
+	default:
+	}
+
+	// nextListObj reads from the prefetch channel
+	var currentPage []s3types.Object
+	var pageIdx int
+	var pageLast bool
+	var listDone bool
+
+	nextListObj := func() (*s3types.Object, bool) {
+		if listDone {
+			return nil, false
+		}
+		for pageIdx >= len(currentPage) {
+			select {
+			case p, ok := <-pages:
+				if !ok {
+					listDone = true
+					return nil, false
+				}
+				currentPage = p.objs
+				pageIdx = 0
+				pageLast = p.last
+			case <-errCh:
+				return nil, false
+			case <-ctx.Done():
+				return nil, false
+			}
+		}
+		obj := currentPage[pageIdx]
 		pageIdx++
-		if pageIdx == len(pageObjs) && lastPage {
+		if pageIdx == len(currentPage) && pageLast {
 			listDone = true
 		}
 		return &obj, true
