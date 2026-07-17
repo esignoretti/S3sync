@@ -251,6 +251,18 @@ func (s *Server) recoverCrashedPairs() {
 	}
 }
 
+func (s *Server) serveHistory(c *gin.Context) {
+	p, err := s.repo.GetSyncPair(c.Param("id"))
+	if err != nil {
+		c.String(404, "not found")
+		return
+	}
+	c.HTML(200, "history.html", gin.H{
+		"PairID": p.ID,
+		"Name":   p.Name,
+	})
+}
+
 func (s *Server) Router() *gin.Engine {
 	s.recoverCrashedPairs()
 	r := gin.Default()
@@ -273,6 +285,7 @@ func (s *Server) Router() *gin.Engine {
 		api.POST("/sync-pairs/:id/reset", s.resetSyncPair)
 		api.GET("/sync-pairs/:id/status", s.syncStatus)
 		api.GET("/sync-pairs/:id/logs", s.syncLogs)
+		api.GET("/sync-pairs/:id/history", s.serveHistory)
 
 		api.GET("/health", s.health)
 		api.GET("/version", s.version)

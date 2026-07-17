@@ -1,0 +1,42 @@
+{{template "layout" .}}
+{{define "content"}}
+<h1 class="page-title">Sync History: {{.Name}}</h1>
+<div id="history-table"><p>Loading...</p></div>
+<a href="/" class="btn btn-sm btn-secondary" style="margin-top:16px">Back to Dashboard</a>
+<script>
+async function loadHistory() {
+  let pairId = '{{.PairID}}';
+  try {
+    let res = await fetch('/api/sync-pairs/' + pairId + '/logs');
+    let json = await res.json();
+    let logs = json.data || json || [];
+    if (logs.length === 0) {
+      document.getElementById('history-table').innerHTML = '<p>No sync history yet.</p>';
+      return;
+    }
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+    html += '<thead><tr style="border-bottom:1px solid var(--hairline)">' +
+      '<th style="text-align:left;padding:8px">Time</th>' +
+      '<th style="text-align:left;padding:8px">Status</th>' +
+      '<th style="text-align:left;padding:8px">Succeeded</th>' +
+      '<th style="text-align:left;padding:8px">Failed</th>' +
+      '<th style="text-align:left;padding:8px">Error</th></tr></thead><tbody>';
+    logs.forEach(l => {
+      let t = l.completed_at ? new Date(l.completed_at).toLocaleString() : '—';
+      let sc = l.status === 'ok' ? 'status-synced' : l.status === 'error' ? 'status-error' : '';
+      html += `<tr style="border-bottom:1px solid var(--hairline)">` +
+        `<td style="padding:8px">${t}</td>` +
+        `<td style="padding:8px"><span class="status-pill ${sc}">${l.status || '—'}</span></td>` +
+        `<td style="padding:8px">${l.succeeded || 0}</td>` +
+        `<td style="padding:8px">${l.failed || 0}</td>` +
+        `<td style="padding:8px;color:var(--red)">${l.error_msg || ''}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    document.getElementById('history-table').innerHTML = html;
+  } catch(e) {
+    document.getElementById('history-table').innerHTML = '<p>Failed to load history.</p>';
+  }
+}
+loadHistory();
+</script>
+{{end}}

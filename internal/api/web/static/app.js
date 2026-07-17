@@ -130,6 +130,7 @@ async function pollStatus() {
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
                     <button class="btn btn-sm ${p.enabled ? 'btn-secondary' : 'btn-primary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Pause' : 'Resume'}</button>
                     <button class="btn btn-sm btn-secondary" data-action="reset" data-id="${p.id}">Reset</button>
+                    <button class="btn btn-sm btn-secondary" data-action="history" data-id="${p.id}">History</button>
                     <button class="btn btn-sm btn-warning" data-action="errors" data-id="${p.id}" data-name="${p.name}">Errors</button>
                     <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
                 </div>
@@ -161,6 +162,11 @@ async function pollStatus() {
         grid.querySelectorAll('[data-action="edit"]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 openEditModal(btn.dataset.id, btn.dataset.interval, btn.dataset.workers, btn.dataset.maxOps, btn.dataset.webhookUrl, btn.dataset.webhookEvents, btn.dataset.dryRun);
+            });
+        });
+        grid.querySelectorAll('[data-action="history"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                window.location.href = '/sync-pairs/' + btn.dataset.id + '/history';
             });
         });
         grid.querySelectorAll('[data-action="errors"]').forEach(btn => {
