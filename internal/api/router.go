@@ -141,9 +141,10 @@ func (s *Server) runPairSync(ctx context.Context, pairID string) error {
 }
 
 // afterSync persists sync results to DB: status, consecutive errors, sync log.
-func (s *Server) afterSync(pairID string, startedAt time.Time) {
+func (s *Server) afterSync(pairID string, startedAt time.Time, syncErr error) {
 	if eng, ok := s.GetEngine(pairID); ok {
 		_, _, status, lastError, _ := eng.Status()
+		succeeded, failed := eng.LastResult()
 		pair, err := s.repo.GetSyncPair(pairID)
 		if err != nil {
 			return
@@ -157,12 +158,17 @@ func (s *Server) afterSync(pairID string, startedAt time.Time) {
 			pair.ConsecutiveErrors = 0
 		}
 		s.repo.UpdateSyncPair(pair)
+
+		errMsg := lastError
+		if syncErr != nil {
+			errMsg = syncErr.Error()
+		}
 		s.repo.CreateSyncLog(&config.SyncLogEntry{
 			PairID:      pairID,
 			Status:      status,
-			ErrorMsg:    lastError,
-			Succeeded:   0, // engine doesn't expose counts externally yet
-			Failed:      0,
+			ErrorMsg:    errMsg,
+			Succeeded:   succeeded,
+			Failed:      failed,
 			StartedAt:   startedAt,
 			CompletedAt: now,
 		})
@@ -193,8 +199,8 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 
 		// First run immediately
 		started := time.Now()
-		engine.RunOnce(ctx)
-		s.afterSync(p.ID, started)
+		runErr := engine.RunOnce(ctx)
+		s.afterSync(p.ID, started, runErr)
 
 		// Then run every interval after each completion
 		for {
@@ -208,10 +214,11 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 					return
 				}
 				started := time.Now()
-				if err := engine.RunOnce(ctx); err != nil {
-					slog.Error("engine loop: sync failed", "pair", p.Name, "error", err)
+				runErr := engine.RunOnce(ctx)
+				if runErr != nil {
+					slog.Error("engine loop: sync failed", "pair", p.Name, "error", runErr)
 				}
-				s.afterSync(p.ID, started)
+				s.afterSync(p.ID, started, runErr)
 			case <-ctx.Done():
 				timer.Stop()
 				slog.Info("engine loop: shutting down", "pair", p.Name)

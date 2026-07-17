@@ -34,8 +34,10 @@ type Engine struct {
 	lastStatus string
 	lastError  string
 	progress   *Progress
-	lastResult *Progress
-	cancel     context.CancelFunc
+	lastResult    *Progress
+	lastSucceeded int
+	lastFailed    int
+	cancel        context.CancelFunc
 
 	setupOnce sync.Once
 }
@@ -161,6 +163,12 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		}()
 		r := <-poolCh
 		succeeded, succeededCount, failed = r.succeeded, r.count, r.failed
+
+		e.mu.Lock()
+		e.lastSucceeded = succeededCount
+		e.lastFailed = failed
+		e.mu.Unlock()
+
 		slog.Info("pool completed", "pair", e.pair.Name, "succeeded", succeededCount, "failed", failed)
 	}
 
@@ -253,6 +261,12 @@ func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastE
 		p = *e.lastResult
 	}
 	return e.running, e.lastRun, e.lastStatus, e.lastError, p
+}
+
+func (e *Engine) LastResult() (succeeded, failed int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastSucceeded, e.lastFailed
 }
 
 func ptr[T any](v T) *T {
