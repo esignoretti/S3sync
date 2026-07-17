@@ -46,6 +46,34 @@ func (s *Store) Put(obj *CachedObject) error {
 	})
 }
 
+func (s *Store) PutMany(objs []*CachedObject) error {
+	if len(objs) == 0 {
+		return nil
+	}
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		buckets := make(map[string]*bbolt.Bucket)
+		for _, obj := range objs {
+			b, ok := buckets[obj.PairID]
+			if !ok {
+				var err error
+				b, err = s.ensureBucket(obj.PairID, tx)
+				if err != nil {
+					return err
+				}
+				buckets[obj.PairID] = b
+			}
+			data, err := json.Marshal(obj)
+			if err != nil {
+				return err
+			}
+			if err := b.Put([]byte(obj.Key), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (s *Store) Delete(pairID, key string) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(s.bucket(pairID))

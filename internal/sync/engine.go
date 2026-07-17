@@ -182,14 +182,16 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}
 
 	now := time.Now().UTC()
+	cached := make([]*cache.CachedObject, 0, len(succeeded))
 	for _, a := range succeeded {
-		if err := e.store.Put(&cache.CachedObject{
+		cached = append(cached, &cache.CachedObject{
 			PairID: e.pair.ID, Key: a.Key,
 			ETag: a.ETag, Size: a.Size,
 			LastModified: a.LastModified, SyncedAt: now,
-		}); err != nil {
-			slog.Warn("cache put failed", "pair", e.pair.Name, "key", a.Key, "error", err)
-		}
+		})
+	}
+	if err := e.store.PutMany(cached); err != nil {
+		slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
 	}
 
 	totalActions := succeededCount + failed
