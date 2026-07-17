@@ -25,12 +25,14 @@ document.addEventListener('alpine:init', () => {
                     bucket_name: this.f.bucket_name, access_key: this.f.access_key,
                     secret_key: this.f.secret_key, versioning: this.f.versioning,
                     object_lock: this.f.object_lock, retention_mode: this.f.retention_mode,
-                    retention_days: this.f.retention_days,
+                    retention_days: parseInt(this.f.retention_days) || 365,
                 };
             } else {
                 body = {
-                    pair_name: this.f.pair_name, sync_interval: this.f.sync_interval,
-                    worker_count: this.f.worker_count, max_get_ops_per_minute: this.f.max_get_ops_per_minute,
+                    pair_name: this.f.pair_name,
+                    sync_interval: parseInt(this.f.sync_interval) || 300,
+                    worker_count: parseInt(this.f.worker_count) || 10,
+                    max_get_ops_per_minute: parseInt(this.f.max_get_ops_per_minute) || 600,
                     delete_propagation: this.f.delete_propagation,
                     target_storage_class: this.f.target_storage_class,
                 };
