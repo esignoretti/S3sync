@@ -230,7 +230,29 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 	return nil
 }
 
+func (s *Server) recoverCrashedPairs() {
+	pairs, err := s.repo.ListSyncPairs()
+	if err != nil {
+		slog.Warn("recover: list pairs", "error", err)
+		return
+	}
+	for _, p := range pairs {
+		if !p.Enabled {
+			continue
+		}
+		if p.LastSyncStatus == "" && p.ConsecutiveErrors > 0 {
+			slog.Info("recover: resetting stale pair", "pair", p.Name)
+			p.ConsecutiveErrors = 0
+			p.LastSyncStatus = "ok"
+			if err := s.repo.UpdateSyncPair(&p); err != nil {
+				slog.Warn("recover: update pair", "pair", p.Name, "error", err)
+			}
+		}
+	}
+}
+
 func (s *Server) Router() *gin.Engine {
+	s.recoverCrashedPairs()
 	r := gin.Default()
 
 	api := r.Group("/api")
