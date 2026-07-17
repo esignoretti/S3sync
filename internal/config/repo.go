@@ -249,6 +249,24 @@ func (r *Repository) ListSyncLogs(pairID string, limit int) ([]SyncLogEntry, err
 	return out, rows.Err()
 }
 
+type PairStats struct {
+	TotalRuns      int `json:"total_runs"`
+	TotalSucceeded int `json:"total_succeeded"`
+	TotalFailed    int `json:"total_failed"`
+}
+
+func (r *Repository) GetPairStats(pairID string) (*PairStats, error) {
+	stats := &PairStats{}
+	err := r.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(succeeded),0), COALESCE(SUM(failed),0)
+		FROM sync_logs WHERE pair_id = ?`, pairID).Scan(
+		&stats.TotalRuns, &stats.TotalSucceeded, &stats.TotalFailed)
+	if err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
+
 // --- scanning helpers ---
 
 func scanBuckets(rows *sql.Rows) ([]Bucket, error) {

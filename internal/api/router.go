@@ -285,6 +285,7 @@ func (s *Server) Router() *gin.Engine {
 		api.POST("/sync-pairs/:id/reset", s.resetSyncPair)
 		api.GET("/sync-pairs/:id/status", s.syncStatus)
 		api.GET("/sync-pairs/:id/logs", s.syncLogs)
+		api.GET("/sync-pairs/:id/stats", s.getSyncPairStats)
 		api.GET("/sync-pairs/:id/history", s.serveHistory)
 
 		api.GET("/health", s.health)

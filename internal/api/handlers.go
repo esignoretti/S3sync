@@ -346,6 +346,15 @@ func (s *Server) syncLogs(c *gin.Context) {
 	respond(c, http.StatusOK, logs)
 }
 
+func (s *Server) getSyncPairStats(c *gin.Context) {
+	stats, err := s.repo.GetPairStats(c.Param("id"))
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond(c, http.StatusOK, stats)
+}
+
 func (s *Server) setup(c *gin.Context) {
 	var in config.SetupInput
 	if err := c.ShouldBindJSON(&in); err != nil {
