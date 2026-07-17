@@ -125,11 +125,25 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		diffErrCh <- err
 	}()
 
+	// Count actions live for progress bar by forwarding through a counter
+	countedActions := make(chan SyncAction, 10000)
+	go func() {
+		count := 0
+		for a := range actions {
+			count++
+			e.mu.Lock()
+			e.progress.Total = count
+			e.mu.Unlock()
+			countedActions <- a
+		}
+		close(countedActions)
+	}()
+
 	var succeeded []SyncAction
 	var succeededCount, failed int
 
 	if e.pair.DryRun {
-		for a := range actions {
+		for a := range countedActions {
 			slog.Info("dry-run", "action", a.Type, "key", a.Key)
 			succeeded = append(succeeded, a)
 			succeededCount++
@@ -145,7 +159,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		}
 		poolCh := make(chan poolResult, 1)
 		go func() {
-			s, c, f := e.pool.Run(ctx, actions)
+			s, c, f := e.pool.Run(ctx, countedActions)
 			poolCh <- poolResult{s, c, f}
 		}()
 		r := <-poolCh
