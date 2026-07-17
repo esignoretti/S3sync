@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/esignoretti/S3sync/internal/cache"
@@ -45,11 +46,35 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	engine := NewEngine(pair, src, tgt, srcS3, tgtS3, cacheStore)
 	start := time.Now()
 
+	// Progress display goroutine
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_, _, _, _, prog := engine.Status()
+				fmt.Fprintf(os.Stderr, "\r  objects: %d copied, %d failed  ", prog.Completed, prog.Failed)
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	if err := engine.RunOnce(ctx); err != nil {
+		close(done)
+		<-done
+		fmt.Fprintf(os.Stderr, "\nSync FAILED: %v\n", err)
 		return fmt.Errorf("sync: %w", err)
 	}
 
-	_, _, status, _, _ := engine.Status()
+	close(done)
+	<-done // wait for progress goroutine to finish
+
+	_, _, status, _, prog := engine.Status()
+	fmt.Fprintf(os.Stderr, "\r  objects: %d copied, %d failed  \n", prog.Completed, prog.Failed)
 	now := time.Now().UTC()
 	pair.LastSyncAt = &now
 	pair.LastSyncStatus = status
