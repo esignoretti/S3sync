@@ -117,7 +117,7 @@ async function pollStatus() {
                 <div class="pair-actions">
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
                     <button class="btn btn-sm ${p.enabled ? 'btn-secondary' : 'btn-primary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Pause' : 'Resume'}</button>
-                    <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${p.id}" data-interval="${p.sync_interval}" data-workers="${p.worker_count}" data-max-ops="${p.max_get_ops_per_minute}">Edit</button>
+                    <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${p.id}" data-interval="${p.sync_interval}" data-workers="${p.worker_count}" data-max-ops="${p.max_get_ops_per_minute}" data-webhook-url="${p.webhook_url || ''}" data-webhook-events="${p.webhook_events || ''}" data-dry-run="${p.dry_run || false}">Edit</button>
                     <button class="btn btn-sm btn-secondary" data-action="reset" data-id="${p.id}">Reset</button>
                     <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
                 </div>
@@ -148,7 +148,7 @@ async function pollStatus() {
         });
         grid.querySelectorAll('[data-action="edit"]').forEach(btn => {
             btn.addEventListener('click', async () => {
-                openEditModal(btn.dataset.id, btn.dataset.interval, btn.dataset.workers, btn.dataset.maxOps);
+                openEditModal(btn.dataset.id, btn.dataset.interval, btn.dataset.workers, btn.dataset.maxOps, btn.dataset.webhookUrl, btn.dataset.webhookEvents, btn.dataset.dryRun);
             });
         });
         grid.querySelectorAll('[data-action="reset"]').forEach(btn => {
@@ -165,11 +165,14 @@ async function pollStatus() {
 }
 
 let editPairId = null;
-function openEditModal(pairId, interval, workers, maxOps) {
+function openEditModal(pairId, interval, workers, maxOps, webhookUrl, webhookEvents, dryRun) {
     editPairId = pairId;
     document.getElementById('edit-interval').value = interval || '';
     document.getElementById('edit-workers').value = workers || '';
     document.getElementById('edit-max-ops').value = maxOps || '';
+    document.getElementById('edit-webhook-url').value = webhookUrl || '';
+    document.getElementById('edit-webhook-events').value = webhookEvents || '';
+    document.getElementById('edit-dry-run').checked = dryRun === 'true';
     document.getElementById('edit-modal').style.display = 'flex';
 }
 function closeEditModal() {
@@ -180,10 +183,16 @@ async function saveEdit() {
     let interval = parseInt(document.getElementById('edit-interval').value);
     let workers = parseInt(document.getElementById('edit-workers').value);
     let maxOps = parseInt(document.getElementById('edit-max-ops').value);
+    let webhookUrl = document.getElementById('edit-webhook-url').value;
+    let webhookEvents = document.getElementById('edit-webhook-events').value;
+    let dryRun = document.getElementById('edit-dry-run').checked;
     let body = {};
     if (!isNaN(interval)) body.sync_interval = interval;
     if (!isNaN(workers)) body.worker_count = workers;
     if (!isNaN(maxOps)) body.max_get_ops_per_minute = maxOps;
+    if (webhookUrl) body.webhook_url = webhookUrl;
+    if (webhookEvents) body.webhook_events = webhookEvents;
+    body.dry_run = dryRun;
     try {
         await fetch('/api/sync-pairs/' + editPairId, {
             method: 'PUT',

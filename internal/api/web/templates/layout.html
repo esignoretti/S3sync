@@ -32,6 +32,13 @@
             <label>Max Get Ops / min (0 = unlimited)
                 <input type="number" id="edit-max-ops" min="0" step="10">
             </label>
+            <label>Webhook URL
+                <input type="text" id="edit-webhook-url" placeholder="https://hooks.example.com/sync">
+            </label>
+            <label>Webhook Events (error, success, all, or comma-separated)
+                <input type="text" id="edit-webhook-events" placeholder="error">
+            </label>
+            <label class="checkbox-label"><input type="checkbox" id="edit-dry-run"> Dry run (preview only)</label>
             <div class="modal-actions">
                 <button class="btn btn-sm btn-secondary" onclick="closeEditModal()">Cancel</button>
                 <button class="btn btn-sm btn-primary" onclick="saveEdit()">Save</button>

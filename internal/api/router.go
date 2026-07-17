@@ -140,6 +140,35 @@ func (s *Server) runPairSync(ctx context.Context, pairID string) error {
 	return eng.RunOnce(ctx)
 }
 
+// afterSync persists sync results to DB: status, consecutive errors, sync log.
+func (s *Server) afterSync(pairID string, startedAt time.Time) {
+	if eng, ok := s.GetEngine(pairID); ok {
+		_, _, status, lastError, _ := eng.Status()
+		pair, err := s.repo.GetSyncPair(pairID)
+		if err != nil {
+			return
+		}
+		now := time.Now().UTC()
+		pair.LastSyncAt = &now
+		pair.LastSyncStatus = status
+		if status == "error" {
+			pair.ConsecutiveErrors++
+		} else {
+			pair.ConsecutiveErrors = 0
+		}
+		s.repo.UpdateSyncPair(pair)
+		s.repo.CreateSyncLog(&config.SyncLogEntry{
+			PairID:      pairID,
+			Status:      status,
+			ErrorMsg:    lastError,
+			Succeeded:   0, // engine doesn't expose counts externally yet
+			Failed:      0,
+			StartedAt:   startedAt,
+			CompletedAt: now,
+		})
+	}
+}
+
 // StartEngineLoop creates an engine for the given pair and runs its
 // periodic-sync loop until the pair is disabled or ctx is cancelled.
 // Returns nil if an engine loop is already running for this pair.
@@ -162,13 +191,9 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 		defer engine.Stop()
 		defer s.DeleteEngine(p.ID)
 
-		// Run once immediately on start
+		started := time.Now()
 		engine.RunOnce(ctx)
-		_, _, status, _, _ := engine.Status()
-		if pair, err := s.repo.GetSyncPair(p.ID); err == nil {
-			pair.LastSyncStatus = status
-			s.repo.UpdateSyncPair(pair)
-		}
+		s.afterSync(p.ID, started)
 
 		for {
 			select {
@@ -178,14 +203,11 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 					slog.Info("engine loop: pair disabled", "pair", p.Name)
 					return
 				}
+				started := time.Now()
 				if err := engine.RunOnce(ctx); err != nil {
 					slog.Error("engine loop: sync failed", "pair", p.Name, "error", err)
 				}
-				_, _, status, _, _ := engine.Status()
-				if pair, err := s.repo.GetSyncPair(p.ID); err == nil {
-					pair.LastSyncStatus = status
-					s.repo.UpdateSyncPair(pair)
-				}
+				s.afterSync(p.ID, started)
 			case <-ctx.Done():
 				slog.Info("engine loop: shutting down", "pair", p.Name)
 				return
