@@ -159,24 +159,30 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		return diffErr
 	}
 
+	totalActions := succeededCount + failed
+	e.mu.Lock()
+	e.progress.Total = totalActions
+	e.mu.Unlock()
+
 	now := time.Now().UTC()
 	for _, a := range succeeded {
-		e.store.Put(&cache.CachedObject{
+		if err := e.store.Put(&cache.CachedObject{
 			PairID: e.pair.ID, Key: a.Key,
 			ETag: a.ETag, Size: a.Size,
 			LastModified: a.LastModified, SyncedAt: now,
-		})
+		}); err != nil {
+			slog.Warn("cache put failed", "pair", e.pair.Name, "key", a.Key, "error", err)
+		}
 	}
 
 	totalSucceeded := succeededCount
 	totalFailed := failed
-	totalActions := totalSucceeded + totalFailed
 
 	slog.Info("sync complete", "pair", e.pair.Name,
 		"succeeded", totalSucceeded, "failed", totalFailed)
 
 	e.mu.Lock()
-	e.progress.Total = totalActions
+	e.progress.Total = totalSucceeded + totalFailed
 	e.mu.Unlock()
 
 	status := "ok"

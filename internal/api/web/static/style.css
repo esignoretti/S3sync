@@ -166,6 +166,9 @@ body {
 .sync-progress.idle .sync-bar { width: 0; }
 @keyframes sync-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 
+/* Only pulse if there's something to track */
+.sync-progress.running .sync-bar:not([style*="width"]) { width: 0; background: var(--blue); }
+
 /* Modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 24px; min-width: 320px; }

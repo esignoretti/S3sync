@@ -99,8 +99,8 @@ async function pollStatus() {
                     <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${prog.completed}/${prog.total} (${pct}%)</span></div>`;
             } else if (p.last_error) {
                 progressHTML = `<div class="stat error-detail"><span class="stat-label">Error</span><span class="stat-value">${p.last_error}</span></div>`;
-            } else {
-                progressHTML = `<div class="sync-progress ${statusClass}"><div class="sync-bar"></div></div>`;
+            } else if (!p.running) {
+                progressHTML = `<div class="sync-progress idle"><div class="sync-bar"></div></div>`;
             }
             card.innerHTML = `
                 <div class="pair-header">

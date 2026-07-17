@@ -31,6 +31,17 @@ func (t *Throttler) Wait(ctx context.Context) error {
 	return t.limiter.Wait(ctx)
 }
 
+func (t *Throttler) SetRate(maxOpsPerMinute int) {
+	if maxOpsPerMinute <= 0 {
+		t.enabled = false
+		return
+	}
+	t.enabled = true
+	limit := rate.Limit(float64(maxOpsPerMinute) / 60.0)
+	t.limiter.SetLimit(limit)
+	t.limiter.SetBurst(maxOpsPerMinute)
+}
+
 func (t *Throttler) WaitLog(ctx context.Context, label string) error {
 	if !t.enabled {
 		return nil
