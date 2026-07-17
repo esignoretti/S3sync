@@ -25,11 +25,8 @@ type SyncAction struct {
 	LastModified time.Time
 }
 
-// StreamingDiff performs a merge-join between S3 listing pages and the cache cursor.
-// It emits SyncActions to the actions channel as it goes.
-// S3 listing comes page-by-page via listPage func.
-// Cache cursor iterates BoltDB in key order.
-// Both are sorted by key, so we advance both pointers like a merge-join.
+const maxS3Keys = 1000
+
 func StreamingDiff(
 	ctx context.Context,
 	listPage func(context.Context, *string) (*s3.ListObjectsV2Output, error),
@@ -42,22 +39,60 @@ func StreamingDiff(
 	var token *string
 	var pageObjs []s3types.Object
 	var pageIdx int
+	var lastPage bool
+	var listDone bool
+	var prevToken string
+	var seenMaxKey string
+	var pageCount int
 
 	nextListObj := func() (*s3types.Object, bool) {
+		if listDone {
+			return nil, false
+		}
 		for pageIdx >= len(pageObjs) {
+			pageCount++
+			if pageCount > 100000 {
+				return nil, false
+			}
 			out, err := listPage(ctx, token)
 			if err != nil {
 				return nil, false
 			}
 			pageObjs = out.Contents
 			pageIdx = 0
-			token = out.NextContinuationToken
-			if len(pageObjs) == 0 && token == nil {
+
+			isTruncated := out.IsTruncated != nil && *out.IsTruncated
+			nextToken := ""
+			if out.NextContinuationToken != nil {
+				nextToken = *out.NextContinuationToken
+			}
+
+			if len(pageObjs) == 0 {
 				return nil, false
 			}
+
+			if !isTruncated || nextToken == "" || len(pageObjs) < maxS3Keys {
+				lastPage = true
+			}
+			if nextToken != "" && nextToken == prevToken {
+				lastPage = true
+			}
+			firstKey := aws.ToString(pageObjs[0].Key)
+			if seenMaxKey != "" && firstKey <= seenMaxKey {
+				lastPage = true
+			}
+			lastKey := aws.ToString(pageObjs[len(pageObjs)-1].Key)
+			if lastKey > seenMaxKey {
+				seenMaxKey = lastKey
+			}
+			prevToken = nextToken
+			token = out.NextContinuationToken
 		}
 		obj := pageObjs[pageIdx]
 		pageIdx++
+		if pageIdx == len(pageObjs) && lastPage {
+			listDone = true
+		}
 		return &obj, true
 	}
 

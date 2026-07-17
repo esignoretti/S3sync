@@ -34,6 +34,7 @@ type Engine struct {
 	lastStatus string
 	lastError  string
 	progress   *Progress
+	lastResult *Progress
 	cancel     context.CancelFunc
 
 	setupOnce sync.Once
@@ -68,13 +69,17 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.mu.Unlock()
 
 	e.mu.Lock()
+	if e.progress.Total > 0 || e.progress.Completed > 0 {
+		e.lastResult = &Progress{Total: e.progress.Total, Completed: e.progress.Completed, Failed: e.progress.Failed}
+	}
 	e.progress.Total = 0
 	e.progress.Completed = 0
 	e.progress.Failed = 0
 	e.lastError = ""
 	e.mu.Unlock()
 
-	ctx, cancel := context.WithCancel(ctx)
+	timeout := 5 * time.Minute
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	e.mu.Lock()
 	if e.cancel != nil {
 		e.cancel()
@@ -94,7 +99,9 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	startTime := time.Now()
 
 	e.setupOnce.Do(func() {
-		if err := SetupTargetBucket(ctx, e.tgtS3, e.src.Region, e.tgt); err != nil {
+		setupCtx, setupCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer setupCancel()
+		if err := SetupTargetBucket(setupCtx, e.tgtS3, e.src.Region, e.tgt); err != nil {
 			slog.Warn("target bucket setup", "pair", e.pair.Name, "error", err)
 		}
 	})
@@ -104,16 +111,17 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		e.setResult("error", fmt.Sprintf("cache cursor: %v", err))
 		return fmt.Errorf("cache cursor: %w", err)
 	}
-	defer closeCur()
 
 	actions := make(chan SyncAction, 10000)
 	diffErrCh := make(chan error, 1)
 
 	listPage := func(ctx context.Context, token *string) (*s3.ListObjectsV2Output, error) {
-		if err := e.throttler.WaitLog(ctx, e.src.BucketName); err != nil {
+		reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := e.throttler.WaitLog(reqCtx, e.src.BucketName); err != nil {
 			return nil, err
 		}
-		return e.srcS3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		return e.srcS3.ListObjectsV2(reqCtx, &s3.ListObjectsV2Input{
 			Bucket:            &e.src.BucketName,
 			MaxKeys:           ptr[int32](1000),
 			ContinuationToken: token,
@@ -121,35 +129,24 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("diff panic", "pair", e.pair.Name, "recover", r)
+				diffErrCh <- fmt.Errorf("diff panic: %v", r)
+			}
+		}()
 		err := StreamingDiff(ctx, listPage, cacheCur, e.pair.DeletePropagation, actions)
 		diffErrCh <- err
-	}()
-
-	// Count actions live for progress bar by forwarding through a counter
-	countedActions := make(chan SyncAction, 10000)
-	go func() {
-		count := 0
-		for a := range actions {
-			count++
-			e.mu.Lock()
-			e.progress.Total = count
-			e.mu.Unlock()
-			countedActions <- a
-		}
-		close(countedActions)
 	}()
 
 	var succeeded []SyncAction
 	var succeededCount, failed int
 
 	if e.pair.DryRun {
-		for a := range countedActions {
+		for a := range actions {
 			slog.Info("dry-run", "action", a.Type, "key", a.Key)
 			succeeded = append(succeeded, a)
 			succeededCount++
-			e.mu.Lock()
-			e.progress.Completed++
-			e.mu.Unlock()
 		}
 	} else {
 		type poolResult struct {
@@ -159,18 +156,21 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		}
 		poolCh := make(chan poolResult, 1)
 		go func() {
-			s, c, f := e.pool.Run(ctx, countedActions)
+			s, c, f := e.pool.Run(ctx, actions)
 			poolCh <- poolResult{s, c, f}
 		}()
 		r := <-poolCh
 		succeeded, succeededCount, failed = r.succeeded, r.count, r.failed
+		slog.Info("pool completed", "pair", e.pair.Name, "succeeded", succeededCount, "failed", failed)
 	}
 
+	slog.Info("waiting for diff", "pair", e.pair.Name)
 	diffErr := <-diffErrCh
+	slog.Info("diff completed", "pair", e.pair.Name, "err", diffErr)
+	closeCur()
 	if diffErr != nil {
-		slog.Error("diff failed", "pair", e.pair.Name, "error", diffErr)
 		e.setResult("error", fmt.Sprintf("diff: %v", diffErr))
-		return diffErr
+		return fmt.Errorf("diff: %w", diffErr)
 	}
 
 	now := time.Now().UTC()
@@ -184,41 +184,38 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		}
 	}
 
-	totalSucceeded := succeededCount
-	totalFailed := failed
+	totalActions := succeededCount + failed
+	e.mu.Lock()
+	e.progress.Total = totalActions
+	e.mu.Unlock()
 
 	slog.Info("sync complete", "pair", e.pair.Name,
-		"succeeded", totalSucceeded, "failed", totalFailed)
-
-	e.mu.Lock()
-	e.progress.Total = totalSucceeded + totalFailed
-	e.mu.Unlock()
+		"succeeded", succeededCount, "failed", failed)
 
 	status := "ok"
 	lastErr := ""
-	if totalFailed > 0 {
+	if failed > 0 {
 		status = "error"
-		lastErr = fmt.Sprintf("%d worker(s) failed", totalFailed)
+		lastErr = fmt.Sprintf("%d worker(s) failed", failed)
 	}
 	e.setResult(status, lastErr)
 	e.lastRun = time.Now()
 
-	// Fire webhook (async)
 	if e.pair.WebhookURL != "" {
 		go func() {
 			p := WebhookPayload{
-				Event:            "sync_completed",
-				PairID:           e.pair.ID,
-				PairName:         e.pair.Name,
-				Status:           status,
+				Event:             "sync_completed",
+				PairID:            e.pair.ID,
+				PairName:          e.pair.Name,
+				Status:            status,
 				ConsecutiveErrors: e.pair.ConsecutiveErrors,
-				LastError:        lastErr,
-				Succeeded:        totalSucceeded,
-				Failed:           totalFailed,
-				StartedAt:        startTime.UTC().Format(time.RFC3339),
-				CompletedAt:      now.Format(time.RFC3339),
-				Source:           e.src.BucketName,
-				Target:           e.tgt.BucketName,
+				LastError:         lastErr,
+				Succeeded:         succeededCount,
+				Failed:            failed,
+				StartedAt:         startTime.UTC().Format(time.RFC3339),
+				CompletedAt:       now.Format(time.RFC3339),
+				Source:            e.src.BucketName,
+				Target:            e.tgt.BucketName,
 			}
 			SendWebhook(e.pair.WebhookURL, e.pair.WebhookEvents, p)
 		}()
@@ -251,6 +248,9 @@ func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastE
 	p := Progress{}
 	if e.progress != nil {
 		p = *e.progress
+	}
+	if !e.running && p.Total == 0 && p.Completed == 0 && e.lastResult != nil {
+		p = *e.lastResult
 	}
 	return e.running, e.lastRun, e.lastStatus, e.lastError, p
 }

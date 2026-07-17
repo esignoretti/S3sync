@@ -92,27 +92,30 @@ async function pollStatus() {
             let lastSync = p.last_sync_at ? new Date(p.last_sync_at).toLocaleString() : '—';
             let prog = p.progress || {};
             let pct = prog.total > 0 ? Math.round(prog.completed / prog.total * 100) : 0;
-            let progressHTML = '';
+            let progressValue, progressClass;
             if (p.running) {
-                statusClass = 'running';
+                progressClass = 'running';
                 if (prog.total > 0) {
-                    progressHTML = `<div class="sync-progress running"><div class="sync-bar" style="width:${pct}%"></div></div>
-                        <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${prog.completed}/${prog.total} (${pct}%)</span></div>`;
+                    progressValue = `${prog.completed}/${prog.total} (${pct}%)`;
+                } else if (prog.completed > 0) {
+                    progressValue = `${prog.completed} copied`;
                 } else {
-                    progressHTML = `<div class="sync-progress running"><div class="sync-bar"></div></div><div class="stat"><span class="stat-label">Progress</span><span class="stat-value">scanning...</span></div>`;
+                    progressValue = 'scanning...';
                 }
             } else if (prog.total > 0) {
-                progressHTML = `<div class="sync-progress synced"><div class="sync-bar" style="width:${pct}%"></div></div>
-                    <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${prog.completed}/${prog.total} (${pct}%)</span></div>`;
-            } else if (p.last_error) {
-                progressHTML = `<div class="stat error-detail"><span class="stat-label">Error</span><span class="stat-value">${p.last_error}</span></div>`;
+                progressClass = 'synced';
+                progressValue = `${prog.completed}/${prog.total} (${pct}%)`;
             } else {
-                progressHTML = `<div class="sync-progress idle"><div class="sync-bar"></div></div>`;
+                progressClass = 'idle';
+                progressValue = '—';
             }
+            let progressHTML = `<div class="sync-progress ${progressClass}"><div class="sync-bar" style="${pct > 0 ? 'width:' + pct + '%' : ''}"></div></div>
+                <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${progressValue}</span></div>`;
             card.innerHTML = `
                 <div class="pair-header">
                     <span class="status-pill status-${statusClass}">${status}</span>
                     <h2>${p.name}</h2>
+                    <button class="btn btn-sm btn-secondary header-edit" data-action="edit" data-id="${p.id}" data-interval="${p.sync_interval}" data-workers="${p.worker_count}" data-max-ops="${p.max_get_ops_per_minute}" data-webhook-url="${p.webhook_url || ''}" data-webhook-events="${p.webhook_events || ''}" data-dry-run="${p.dry_run || false}">Edit</button>
                 </div>
                 <div class="pair-stats">
                     <div class="stat"><span class="stat-label">Source</span><span class="stat-value">${p.source_url || p.source_name || p.source_bucket_id.slice(0,8)}</span></div>
@@ -126,8 +129,8 @@ async function pollStatus() {
                 <div class="pair-actions">
                     <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
                     <button class="btn btn-sm ${p.enabled ? 'btn-secondary' : 'btn-primary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Pause' : 'Resume'}</button>
-                    <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${p.id}" data-interval="${p.sync_interval}" data-workers="${p.worker_count}" data-max-ops="${p.max_get_ops_per_minute}" data-webhook-url="${p.webhook_url || ''}" data-webhook-events="${p.webhook_events || ''}" data-dry-run="${p.dry_run || false}">Edit</button>
                     <button class="btn btn-sm btn-secondary" data-action="reset" data-id="${p.id}">Reset</button>
+                    <button class="btn btn-sm btn-warning" data-action="errors" data-id="${p.id}" data-name="${p.name}">Errors</button>
                     <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
                 </div>
             `;
@@ -158,6 +161,11 @@ async function pollStatus() {
         grid.querySelectorAll('[data-action="edit"]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 openEditModal(btn.dataset.id, btn.dataset.interval, btn.dataset.workers, btn.dataset.maxOps, btn.dataset.webhookUrl, btn.dataset.webhookEvents, btn.dataset.dryRun);
+            });
+        });
+        grid.querySelectorAll('[data-action="errors"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                showErrorModal(btn.dataset.id, btn.dataset.name);
             });
         });
         grid.querySelectorAll('[data-action="reset"]').forEach(btn => {
@@ -211,6 +219,36 @@ async function saveEdit() {
     } catch(e) {}
     closeEditModal();
     pollStatus();
+}
+
+async function showErrorModal(pairId, pairName) {
+    document.getElementById('error-modal-name').textContent = pairName;
+    let el = document.getElementById('error-list');
+    el.textContent = 'Loading...';
+    document.getElementById('error-modal').style.display = 'flex';
+    try {
+        let res = await fetch('/api/sync-pairs/' + pairId + '/logs');
+        let json = await res.json();
+        let logs = json.data || json || [];
+        let errors = logs.filter(l => l.status === 'error' || l.error_msg);
+        if (errors.length === 0) {
+            el.textContent = 'No errors.';
+            return;
+        }
+        el.innerHTML = '';
+        errors.forEach(l => {
+            let d = document.createElement('div');
+            d.style.cssText = 'padding:8px 0;border-bottom:1px solid var(--hairline);';
+            let t = l.completed_at ? new Date(l.completed_at).toLocaleString() : '—';
+            d.innerHTML = `<div style="color:var(--red);font-weight:600">${t}</div><div>${l.error_msg || 'Unknown error'}</div>`;
+            el.appendChild(d);
+        });
+    } catch(e) {
+        el.textContent = 'Failed to load errors.';
+    }
+}
+function closeErrorModal() {
+    document.getElementById('error-modal').style.display = 'none';
 }
 
 document.addEventListener('DOMContentLoaded', () => {

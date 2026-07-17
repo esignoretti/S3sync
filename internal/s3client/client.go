@@ -3,6 +3,8 @@ package s3client
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -16,6 +18,13 @@ func NewClient(b *bucketc.Bucket) (*s3.Client, error) {
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithRegion(b.Region),
 		config.WithCredentialsProvider(creds),
+		config.WithHTTPClient(&http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: 10 * time.Second,
+				ExpectContinueTimeout: 5 * time.Second,
+			},
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)

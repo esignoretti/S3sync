@@ -46,6 +46,15 @@
         </div>
     </div>
 
+    <div id="error-modal" class="modal-overlay" style="display:none">
+        <div class="modal modal-wide">
+            <h3>Sync Errors: <span id="error-modal-name"></span></h3>
+            <div id="error-list" style="max-height:400px;overflow-y:auto;font-size:13px;font-family:'SF Mono',Monaco,monospace;white-space:pre-wrap"></div>
+            <div class="modal-actions">
+                <button class="btn btn-sm btn-secondary" onclick="closeErrorModal()">Close</button>
+            </div>
+        </div>
+    </div>
     <script defer src="/static/app.js"></script>
 </body>
 </html>

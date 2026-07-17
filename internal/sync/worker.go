@@ -97,11 +97,14 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 }
 
 func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
-	if err := wp.throttler.WaitLog(ctx, wp.sourceBucket); err != nil {
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if err := wp.throttler.WaitLog(reqCtx, wp.sourceBucket); err != nil {
 		return err
 	}
 
-	headOut, err := wp.client.HeadObject(ctx, &s3.HeadObjectInput{
+	headOut, err := wp.client.HeadObject(reqCtx, &s3.HeadObjectInput{
 		Bucket: &wp.targetBucket, Key: &a.Key,
 	})
 	if err == nil {
@@ -111,7 +114,7 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 		}
 	}
 
-	if err := wp.throttler.WaitLog(ctx, wp.sourceBucket); err != nil {
+	if err := wp.throttler.WaitLog(reqCtx, wp.sourceBucket); err != nil {
 		return err
 	}
 
@@ -125,15 +128,17 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 		input.StorageClass = types.StorageClass(wp.storageClass)
 	}
 
-	_, err = wp.client.CopyObject(ctx, input)
+	_, err = wp.client.CopyObject(reqCtx, input)
 	return err
 }
 
 func (wp *WorkerPool) deleteObject(ctx context.Context, a SyncAction) error {
-	if err := wp.throttler.WaitLog(ctx, wp.sourceBucket); err != nil {
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := wp.throttler.WaitLog(reqCtx, wp.sourceBucket); err != nil {
 		return err
 	}
-	_, err := wp.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	_, err := wp.client.DeleteObject(reqCtx, &s3.DeleteObjectInput{
 		Bucket: &wp.targetBucket, Key: &a.Key,
 	})
 	return err

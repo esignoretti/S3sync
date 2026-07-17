@@ -183,23 +183,27 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 		return fmt.Errorf("create engine: %w", err)
 	}
 
-	ticker := time.NewTicker(time.Duration(p.SyncInterval) * time.Second)
 	slog.Info("engine loop started", "pair", p.Name, "interval", p.SyncInterval)
 
 	go func() {
-		defer ticker.Stop()
 		defer engine.Stop()
 		defer s.DeleteEngine(p.ID)
 
+		interval := time.Duration(p.SyncInterval) * time.Second
+
+		// First run immediately
 		started := time.Now()
 		engine.RunOnce(ctx)
 		s.afterSync(p.ID, started)
 
+		// Then run every interval after each completion
 		for {
+			timer := time.NewTimer(interval)
 			select {
-			case <-ticker.C:
+			case <-timer.C:
 				currentPair, err := s.repo.GetSyncPair(p.ID)
 				if err != nil || !currentPair.Enabled {
+					timer.Stop()
 					slog.Info("engine loop: pair disabled", "pair", p.Name)
 					return
 				}
@@ -209,6 +213,7 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 				}
 				s.afterSync(p.ID, started)
 			case <-ctx.Done():
+				timer.Stop()
 				slog.Info("engine loop: shutting down", "pair", p.Name)
 				return
 			}
