@@ -213,6 +213,12 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
 	}
 
+	if e.pair.CacheMaxSizeMB > 0 || e.pair.CacheTTLDays > 0 {
+		if _, pruneErr := e.store.PruneIfNeeded(e.pair.ID, e.pair.CacheMaxSizeMB, e.pair.CacheTTLDays); pruneErr != nil {
+			slog.Warn("cache prune failed", "pair", e.pair.Name, "error", pruneErr)
+		}
+	}
+
 	totalActions := succeededCount + failed
 	e.mu.Lock()
 	e.progress.Total = totalActions
