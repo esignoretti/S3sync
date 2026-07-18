@@ -6,35 +6,59 @@
 <script>
 async function loadHistory() {
   let pairId = '{{.PairID}}';
+  let el = document.getElementById('history-table');
   try {
     let res = await fetch('/api/sync-pairs/' + pairId + '/logs');
     let json = await res.json();
     let logs = json.data || json || [];
+    el.innerHTML = '';
     if (logs.length === 0) {
-      document.getElementById('history-table').innerHTML = '<p>No sync history yet.</p>';
+      el.innerHTML = '<p>No sync history yet.</p>';
       return;
     }
-    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px">';
-    html += '<thead><tr style="border-bottom:1px solid var(--hairline)">' +
-      '<th style="text-align:left;padding:8px">Time</th>' +
-      '<th style="text-align:left;padding:8px">Status</th>' +
-      '<th style="text-align:left;padding:8px">Succeeded</th>' +
-      '<th style="text-align:left;padding:8px">Failed</th>' +
-      '<th style="text-align:left;padding:8px">Error</th></tr></thead><tbody>';
-    logs.forEach(l => {
-      let t = l.completed_at ? new Date(l.completed_at).toLocaleString() : '—';
-      let sc = l.status === 'ok' ? 'status-synced' : l.status === 'error' ? 'status-error' : '';
-      html += `<tr style="border-bottom:1px solid var(--hairline)">` +
-        `<td style="padding:8px">${t}</td>` +
-        `<td style="padding:8px"><span class="status-pill ${sc}">${l.status || '—'}</span></td>` +
-        `<td style="padding:8px">${l.succeeded || 0}</td>` +
-        `<td style="padding:8px">${l.failed || 0}</td>` +
-        `<td style="padding:8px;color:var(--red)">${l.error_msg || ''}</td></tr>`;
+    let table = document.createElement('table');
+    table.style.cssText = 'width:100%;border-collapse:collapse;font-size:13px';
+    let thead = table.createTHead();
+    let hr = thead.insertRow();
+    hr.style.cssText = 'border-bottom:1px solid var(--hairline)';
+    ['Time','Status','Succeeded','Failed','Error'].forEach(h => {
+      let th = document.createElement('th');
+      th.style.cssText = 'text-align:left;padding:8px';
+      th.textContent = h;
+      hr.appendChild(th);
     });
-    html += '</tbody></table>';
-    document.getElementById('history-table').innerHTML = html;
+    let tbody = table.createTBody();
+    logs.forEach(l => {
+      let tr = tbody.insertRow();
+      tr.style.cssText = 'border-bottom:1px solid var(--hairline)';
+
+      let t = l.completed_at ? new Date(l.completed_at).toLocaleString() : '—';
+      let tdTime = tr.insertCell();
+      tdTime.style.cssText = 'padding:8px';
+      tdTime.textContent = t;
+
+      let sc = l.status === 'ok' ? 'status-synced' : l.status === 'error' ? 'status-error' : '';
+      let tdStatus = tr.insertCell();
+      tdStatus.style.cssText = 'padding:8px';
+      let pill = tdStatus.appendChild(document.createElement('span'));
+      pill.className = 'status-pill ' + sc;
+      pill.textContent = l.status || '—';
+
+      let tdSuc = tr.insertCell();
+      tdSuc.style.cssText = 'padding:8px';
+      tdSuc.textContent = l.succeeded || 0;
+
+      let tdFai = tr.insertCell();
+      tdFai.style.cssText = 'padding:8px';
+      tdFai.textContent = l.failed || 0;
+
+      let tdErr = tr.insertCell();
+      tdErr.style.cssText = 'padding:8px;color:var(--red)';
+      tdErr.textContent = l.error_msg || '';
+    });
+    el.appendChild(table);
   } catch(e) {
-    document.getElementById('history-table').innerHTML = '<p>Failed to load history.</p>';
+    el.textContent = 'Failed to load history.';
   }
 }
 loadHistory();

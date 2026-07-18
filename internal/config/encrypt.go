@@ -10,7 +10,7 @@ import (
 	"io"
 )
 
-const MasterKeyEnv = "BUCKETSYNC_MASTER_KEY"
+const MasterKeyEnv = "BUCKETSYNC_MASTER_KEY" // used by config.NewRepository
 
 func DeriveKey(masterKey []byte) []byte {
 	h := sha256.Sum256(masterKey)

@@ -71,6 +71,10 @@ function defaultForm() {
     };
 }
 
+function txt(el, s) {
+    el.textContent = s;
+}
+
 // Dashboard polling
 async function pollStatus() {
     try {
@@ -87,12 +91,14 @@ async function pollStatus() {
             let card = document.createElement('div');
             card.className = 'pair-card';
             card.dataset.pairId = p.id;
+
             let status = p.running ? 'running' : (p.last_sync_status || 'never');
             let statusClass = status === 'ok' ? 'synced' : status === 'error' ? 'error' : status === 'running' ? 'running' : 'idle';
             let lastSync = p.last_sync_at ? new Date(p.last_sync_at).toLocaleString() : '—';
             let prog = p.progress || {};
             let pct = prog.total > 0 ? Math.round(prog.completed / prog.total * 100) : 0;
             let progressValue, progressClass;
+
             if (p.running) {
                 progressClass = 'running';
                 if (prog.total > 0) {
@@ -109,78 +115,118 @@ async function pollStatus() {
                 progressClass = 'idle';
                 progressValue = '—';
             }
-            let progressHTML = `<div class="sync-progress ${progressClass}"><div class="sync-bar" style="${pct > 0 ? 'width:' + pct + '%' : ''}"></div></div>
-                <div class="stat"><span class="stat-label">Progress</span><span class="stat-value">${progressValue}</span></div>`;
-            card.innerHTML = `
-                <div class="pair-header">
-                    <span class="status-pill status-${statusClass}">${status}</span>
-                    <h2>${p.name}</h2>
-                    <button class="btn btn-sm btn-secondary header-edit" data-action="edit" data-id="${p.id}" data-interval="${p.sync_interval}" data-workers="${p.worker_count}" data-max-ops="${p.max_get_ops_per_minute}" data-webhook-url="${p.webhook_url || ''}" data-webhook-events="${p.webhook_events || ''}" data-dry-run="${p.dry_run || false}">Edit</button>
-                </div>
-                <div class="pair-stats">
-                    <div class="stat"><span class="stat-label">Source</span><span class="stat-value">${p.source_url || p.source_name || p.source_bucket_id.slice(0,8)}</span></div>
-                    <div class="stat"><span class="stat-label">Target</span><span class="stat-value">${p.target_url || p.target_name || p.target_bucket_id.slice(0,8)}</span></div>
-                    <div class="stat"><span class="stat-label">Interval</span><span class="stat-value" data-field="sync_interval">${p.sync_interval}s</span></div>
-                    <div class="stat"><span class="stat-label">Workers</span><span class="stat-value" data-field="worker_count">${p.worker_count}</span></div>
-                    <div class="stat"><span class="stat-label">Last Sync</span><span class="stat-value">${lastSync}</span></div>
-                    <div class="stat"><span class="stat-label">Errors</span><span class="stat-value">${p.consecutive_errors || 0}</span></div>
-                    ${progressHTML}
-                </div>
-                <div class="pair-actions">
-                    <button class="btn btn-sm btn-primary" data-action="sync" data-id="${p.id}">Sync Now</button>
-                    <button class="btn btn-sm ${p.enabled ? 'btn-secondary' : 'btn-primary'}" data-action="toggle" data-id="${p.id}">${p.enabled ? 'Pause' : 'Resume'}</button>
-                    <button class="btn btn-sm btn-secondary" data-action="reset" data-id="${p.id}">Reset</button>
-                    <button class="btn btn-sm btn-secondary" data-action="history" data-id="${p.id}">History</button>
-                    <button class="btn btn-sm btn-warning" data-action="errors" data-id="${p.id}" data-name="${p.name}">Errors</button>
-                    <button class="btn btn-sm btn-danger" data-action="delete" data-id="${p.id}">Delete</button>
-                </div>
-            `;
-            grid.appendChild(card);
-        });
-        grid.querySelectorAll('[data-action="sync"]').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                btn.disabled = true; btn.textContent = 'Syncing...';
-                try { await fetch('/api/sync-pairs/' + btn.dataset.id + '/sync', { method: 'POST' }); } catch(e) {}
-                setTimeout(pollStatus, 200); // immediate re-poll
+
+            // Header
+            let header = card.appendChild(document.createElement('div'));
+            header.className = 'pair-header';
+
+            let pill = header.appendChild(document.createElement('span'));
+            pill.className = 'status-pill status-' + statusClass;
+            txt(pill, status);
+
+            let h2 = header.appendChild(document.createElement('h2'));
+            txt(h2, p.name);
+
+            let editBtn = header.appendChild(document.createElement('button'));
+            editBtn.className = 'btn btn-sm btn-secondary header-edit';
+            editBtn.textContent = 'Edit';
+            editBtn.dataset.action = 'edit';
+            editBtn.dataset.id = p.id;
+            editBtn.dataset.interval = p.sync_interval;
+            editBtn.dataset.workers = p.worker_count;
+            editBtn.dataset.maxOps = p.max_get_ops_per_minute;
+            editBtn.dataset.webhookUrl = p.webhook_url || '';
+            editBtn.dataset.webhookEvents = p.webhook_events || '';
+            editBtn.dataset.dryRun = p.dry_run || false;
+            editBtn.addEventListener('click', () => openEditModal(editBtn.dataset.id, editBtn.dataset.interval, editBtn.dataset.workers, editBtn.dataset.maxOps, editBtn.dataset.webhookUrl, editBtn.dataset.webhookEvents, editBtn.dataset.dryRun));
+
+            // Stats
+            let stats = card.appendChild(document.createElement('div'));
+            stats.className = 'pair-stats';
+
+            function addStat(label, value) {
+                let row = stats.appendChild(document.createElement('div'));
+                row.className = 'stat';
+                let l = row.appendChild(document.createElement('span'));
+                l.className = 'stat-label';
+                txt(l, label);
+                let v = row.appendChild(document.createElement('span'));
+                v.className = 'stat-value';
+                txt(v, value);
+            }
+
+            addStat('Source', p.source_url || p.source_name || p.source_bucket_id.slice(0,8));
+            addStat('Target', p.target_url || p.target_name || p.target_bucket_id.slice(0,8));
+            addStat('Interval', p.sync_interval + 's');
+            addStat('Workers', p.worker_count);
+            addStat('Last Sync', lastSync);
+            addStat('Errors', p.consecutive_errors || 0);
+
+            // Progress bar
+            let progBar = stats.appendChild(document.createElement('div'));
+            progBar.className = 'sync-progress ' + progressClass;
+            let progFill = progBar.appendChild(document.createElement('div'));
+            progFill.className = 'sync-bar';
+            if (pct > 0) progFill.style.width = pct + '%';
+
+            let progRow = stats.appendChild(document.createElement('div'));
+            progRow.className = 'stat';
+            let progLabel = progRow.appendChild(document.createElement('span'));
+            progLabel.className = 'stat-label';
+            txt(progLabel, 'Progress');
+            let progVal = progRow.appendChild(document.createElement('span'));
+            progVal.className = 'stat-value';
+            txt(progVal, progressValue);
+
+            // Actions
+            let actions = card.appendChild(document.createElement('div'));
+            actions.className = 'pair-actions';
+
+            function addActionBtn(text, className, action, id, extra) {
+                let btn = actions.appendChild(document.createElement('button'));
+                btn.className = 'btn btn-sm ' + className;
+                btn.textContent = text;
+                btn.dataset.action = action;
+                btn.dataset.id = id;
+                if (extra) Object.assign(btn.dataset, extra);
+                return btn;
+            }
+
+            addActionBtn('Sync Now', 'btn-primary', 'sync', p.id).addEventListener('click', async function() {
+                this.disabled = true; this.textContent = 'Syncing...';
+                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/sync', { method: 'POST' }); } catch(e) {}
+                setTimeout(pollStatus, 200);
             });
-        });
-        grid.querySelectorAll('[data-action="delete"]').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                if (!confirm('Delete this sync pair?')) return;
-                btn.disabled = true; btn.textContent = 'Deleting...';
-                try { await fetch('/api/sync-pairs/' + btn.dataset.id, { method: 'DELETE' }); } catch(e) {}
+
+            addActionBtn(p.enabled ? 'Pause' : 'Resume', p.enabled ? 'btn-secondary' : 'btn-primary', 'toggle', p.id).addEventListener('click', async function() {
+                this.disabled = true; this.textContent = '...';
+                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/disable', { method: 'POST' }); } catch(e) {}
                 pollStatus();
             });
-        });
-        grid.querySelectorAll('[data-action="toggle"]').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                btn.disabled = true; btn.textContent = '...';
-                try { await fetch('/api/sync-pairs/' + btn.dataset.id + '/disable', { method: 'POST' }); } catch(e) {}
-                pollStatus();
-            });
-        });
-        grid.querySelectorAll('[data-action="edit"]').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                openEditModal(btn.dataset.id, btn.dataset.interval, btn.dataset.workers, btn.dataset.maxOps, btn.dataset.webhookUrl, btn.dataset.webhookEvents, btn.dataset.dryRun);
-            });
-        });
-        grid.querySelectorAll('[data-action="history"]').forEach(btn => {
-            btn.addEventListener('click', () => {
-                window.location.href = '/sync-pairs/' + btn.dataset.id + '/history';
-            });
-        });
-        grid.querySelectorAll('[data-action="errors"]').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                showErrorModal(btn.dataset.id, btn.dataset.name);
-            });
-        });
-        grid.querySelectorAll('[data-action="reset"]').forEach(btn => {
-            btn.addEventListener('click', async () => {
+
+            addActionBtn('Reset', 'btn-secondary', 'reset', p.id).addEventListener('click', async function() {
                 if (!confirm('Reset sync pair? This clears cache and status, then restarts from scratch.')) return;
-                btn.disabled = true; btn.textContent = 'Resetting...';
-                try { await fetch('/api/sync-pairs/' + btn.dataset.id + '/reset', { method: 'POST' }); } catch(e) {}
+                this.disabled = true; this.textContent = 'Resetting...';
+                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/reset', { method: 'POST' }); } catch(e) {}
                 pollStatus();
             });
+
+            addActionBtn('History', 'btn-secondary', 'history', p.id).addEventListener('click', () => {
+                window.location.href = '/sync-pairs/' + p.id + '/history';
+            });
+
+            addActionBtn('Errors', 'btn-warning', 'errors', p.id, {name: p.name}).addEventListener('click', function() {
+                showErrorModal(this.dataset.id, this.dataset.name);
+            });
+
+            addActionBtn('Delete', 'btn-danger', 'delete', p.id).addEventListener('click', async function() {
+                if (!confirm('Delete this sync pair?')) return;
+                this.disabled = true; this.textContent = 'Deleting...';
+                try { await fetch('/api/sync-pairs/' + this.dataset.id, { method: 'DELETE' }); } catch(e) {}
+                pollStatus();
+            });
+
+            grid.appendChild(card);
         });
     } catch(e) {
         console.error('poll failed', e);
@@ -227,31 +273,37 @@ async function saveEdit() {
     pollStatus();
 }
 
-async function showErrorModal(pairId, pairName) {
+function showErrorModal(pairId, pairName) {
     document.getElementById('error-modal-name').textContent = pairName;
     let el = document.getElementById('error-list');
     el.textContent = 'Loading...';
     document.getElementById('error-modal').style.display = 'flex';
-    try {
-        let res = await fetch('/api/sync-pairs/' + pairId + '/logs');
-        let json = await res.json();
-        let logs = json.data || json || [];
-        let errors = logs.filter(l => l.status === 'error' || l.error_msg);
-        if (errors.length === 0) {
-            el.textContent = 'No errors.';
-            return;
+    (async () => {
+        try {
+            let res = await fetch('/api/sync-pairs/' + pairId + '/logs');
+            let json = await res.json();
+            let logs = json.data || json || [];
+            let errors = logs.filter(l => l.status === 'error' || l.error_msg);
+            el.innerHTML = '';
+            if (errors.length === 0) {
+                el.textContent = 'No errors.';
+                return;
+            }
+            errors.forEach(l => {
+                let d = document.createElement('div');
+                d.style.cssText = 'padding:8px 0;border-bottom:1px solid var(--hairline);';
+                let t = l.completed_at ? new Date(l.completed_at).toLocaleString() : '—';
+                let timeDiv = d.appendChild(document.createElement('div'));
+                timeDiv.style.cssText = 'color:var(--red);font-weight:600';
+                timeDiv.textContent = t;
+                let msgDiv = d.appendChild(document.createElement('div'));
+                msgDiv.textContent = l.error_msg || 'Unknown error';
+                el.appendChild(d);
+            });
+        } catch(e) {
+            el.textContent = 'Failed to load errors.';
         }
-        el.innerHTML = '';
-        errors.forEach(l => {
-            let d = document.createElement('div');
-            d.style.cssText = 'padding:8px 0;border-bottom:1px solid var(--hairline);';
-            let t = l.completed_at ? new Date(l.completed_at).toLocaleString() : '—';
-            d.innerHTML = `<div style="color:var(--red);font-weight:600">${t}</div><div>${l.error_msg || 'Unknown error'}</div>`;
-            el.appendChild(d);
-        });
-    } catch(e) {
-        el.textContent = 'Failed to load errors.';
-    }
+    })();
 }
 function closeErrorModal() {
     document.getElementById('error-modal').style.display = 'none';
