@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/esignoretti/S3sync/internal/cache"
 	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/esignoretti/S3sync/internal/s3client"
@@ -273,6 +274,8 @@ func (s *Server) Router() *gin.Engine {
 
 	// Auth middleware — enable by setting S3SYNC_API_KEY env var
 	// r.Use(authRequired)
+
+	r.GET("/metrics", gin.WrapH(promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{})))
 
 	r.GET("/login", s.serveLogin)
 
