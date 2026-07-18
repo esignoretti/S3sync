@@ -189,3 +189,11 @@ body {
 .modal .checkbox-label input { width: auto; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
 
+.login-card { max-width: 400px; margin: 80px auto; text-align: center; }
+.login-title { font-size: 28px; font-weight: 700; color: var(--blue); margin-bottom: 4px; }
+.login-subtitle { font-size: 14px; color: var(--text-muted); margin-bottom: 24px; }
+.login-card form { text-align: left; }
+.login-card .form-group { margin-bottom: 16px; }
+.login-card .error-message { background: rgba(246,70,93,0.1); border: 1px solid var(--red); border-radius: 6px; padding: 12px; margin-bottom: 16px; color: var(--red); font-size: 14px; text-align: left; }
+.btn-full { width: 100%; padding: 12px; }
+

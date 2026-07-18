@@ -267,8 +267,15 @@ func (s *Server) Router() *gin.Engine {
 	s.recoverCrashedPairs()
 	r := gin.Default()
 
+	r.Use(authRequired)
+
+	r.GET("/login", s.serveLogin)
+
 	api := r.Group("/api")
 	{
+		api.POST("/auth/login", s.loginHandler)
+		api.POST("/auth/logout", s.logoutHandler)
+
 		api.POST("/buckets", s.createBucket)
 		api.GET("/buckets", s.listBuckets)
 		api.GET("/buckets/:id", s.getBucket)
