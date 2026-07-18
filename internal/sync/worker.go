@@ -21,7 +21,6 @@ type WorkerPool struct {
 	throttler    *Throttler
 	storageClass string
 	progress     *Progress
-	mu           sync.Mutex
 }
 
 func NewWorkerPool(workers int, client *s3.Client, source, target string,
@@ -65,15 +64,10 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 				} else {
 					slog.Info("worker done", "key", a.Key, "action", a.Type, "ms", time.Since(start).Milliseconds())
 				}
-				results <- result{action: a, err: err}
-				if wp.progress != nil {
-					wp.mu.Lock()
-					wp.progress.Completed++
-					if err != nil {
-						wp.progress.Failed++
-					}
-					wp.mu.Unlock()
-				}
+			results <- result{action: a, err: err}
+			if wp.progress != nil {
+				wp.progress.Add(err != nil)
+			}
 			}
 		}()
 	}

@@ -76,7 +76,11 @@ func StreamingDiff(
 				seenMaxKey = lastKey
 			}
 			prevToken = nextToken
-			pages <- fetchedPage{objs: out.Contents, last: last}
+			select {
+			case pages <- fetchedPage{objs: out.Contents, last: last}:
+			case <-ctx.Done():
+				return
+			}
 			token = out.NextContinuationToken
 			if last {
 				return

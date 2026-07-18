@@ -48,8 +48,9 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 
 	// Progress display goroutine
 	done := make(chan struct{})
+	progDone := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(progDone)
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -65,13 +66,13 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 
 	if err := engine.RunOnce(ctx); err != nil {
 		close(done)
-		<-done
+		<-progDone
 		fmt.Fprintf(os.Stderr, "\nSync FAILED: %v\n", err)
 		return fmt.Errorf("sync: %w", err)
 	}
 
 	close(done)
-	<-done // wait for progress goroutine to finish
+	<-progDone // wait for progress goroutine to finish
 
 	_, _, status, _, prog := engine.Status()
 	fmt.Fprintf(os.Stderr, "\r  objects: %d copied, %d failed  \n", prog.Completed, prog.Failed)

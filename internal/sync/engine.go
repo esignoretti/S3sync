@@ -13,9 +13,28 @@ import (
 )
 
 type Progress struct {
+	mu        sync.Mutex
 	Total     int `json:"total"`
 	Completed int `json:"completed"`
 	Failed    int `json:"failed"`
+}
+
+func (p *Progress) Add(err bool) {
+	p.mu.Lock()
+	p.Completed++
+	if err {
+		p.Failed++
+	}
+	p.mu.Unlock()
+}
+
+func (p *Progress) Snapshot() (total, completed, failed int) {
+	p.mu.Lock()
+	total = p.Total
+	completed = p.Completed
+	failed = p.Failed
+	p.mu.Unlock()
+	return
 }
 
 type Engine struct {
@@ -257,10 +276,15 @@ func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastE
 	defer e.mu.Unlock()
 	p := Progress{}
 	if e.progress != nil {
-		p = *e.progress
+		total, completed, failed := e.progress.Snapshot()
+		p.Total = total
+		p.Completed = completed
+		p.Failed = failed
 	}
 	if !e.running && p.Total == 0 && p.Completed == 0 && e.lastResult != nil {
-		p = *e.lastResult
+		p.Total = e.lastResult.Total
+		p.Completed = e.lastResult.Completed
+		p.Failed = e.lastResult.Failed
 	}
 	return e.running, e.lastRun, e.lastStatus, e.lastError, p
 }
