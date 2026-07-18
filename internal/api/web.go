@@ -15,10 +15,17 @@ var templateFS embed.FS
 //go:embed web/static/*
 var staticFS embed.FS
 
+//go:embed web/openapi.json
+var openapiJSON []byte
+
+//go:embed web/templates/swagger.html
+var swaggerHTML []byte
+
 var (
 	dashboardTmpl *template.Template
 	setupTmpl     *template.Template
 	loginTmpl     *template.Template
+	historyTmpl   *template.Template
 	webStatic     fs.FS
 )
 
@@ -27,6 +34,7 @@ func init() {
 	dashboardTmpl = template.Must(template.Must(raw.Clone()).ParseFS(templateFS, "web/templates/dashboard.html"))
 	setupTmpl = template.Must(template.Must(raw.Clone()).ParseFS(templateFS, "web/templates/setup.html"))
 	loginTmpl = template.Must(template.Must(raw.Clone()).ParseFS(templateFS, "web/templates/login.html"))
+	historyTmpl = template.Must(template.Must(raw.Clone()).ParseFS(templateFS, "web/templates/history.html"))
 	staticSub, err := fs.Sub(staticFS, "web/static")
 	if err != nil {
 		panic(err)

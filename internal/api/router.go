@@ -314,6 +314,13 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/setup", s.setupState)
 	}
 
+	r.GET("/api/openapi.json", func(c *gin.Context) {
+		c.Data(200, "application/json", openapiJSON)
+	})
+	r.GET("/docs", func(c *gin.Context) {
+		c.Data(200, "text/html; charset=utf-8", swaggerHTML)
+	})
+
 	r.GET("/", s.serveDashboard)
 	r.GET("/setup", s.serveSetup)
 	r.GET("/sync-pairs/:id/history", s.serveHistory)

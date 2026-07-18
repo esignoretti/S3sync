@@ -1,0 +1,236 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "S3sync API",
+    "description": "REST API for managing S3/Cubbit DS3 bucket synchronization pairs, triggering syncs, and monitoring results.",
+    "version": "0.2.0"
+  },
+  "servers": [{ "url": "http://localhost:8080", "description": "Local development" }],
+  "paths": {
+    "/api/buckets": {
+      "post": {
+        "tags": ["Buckets"], "summary": "Create a bucket config",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BucketInput" } } } },
+        "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiResponse" } } } } }
+      },
+      "get": {
+        "tags": ["Buckets"], "summary": "List all bucket configs",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiResponse" } } } } }
+      }
+    },
+    "/api/buckets/{id}": {
+      "get": {
+        "tags": ["Buckets"], "summary": "Get a bucket config",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" }, "404": { "description": "Not found" } }
+      },
+      "put": {
+        "tags": ["Buckets"], "summary": "Update a bucket config",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BucketInput" } } } },
+        "responses": { "200": { "description": "Updated" }, "404": { "description": "Not found" } }
+      },
+      "delete": {
+        "tags": ["Buckets"], "summary": "Delete a bucket config",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Deleted" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/api/sync-pairs": {
+      "post": {
+        "tags": ["Sync Pairs"], "summary": "Create a sync pair",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SyncPairInput" } } } },
+        "responses": { "201": { "description": "Created" } }
+      },
+      "get": {
+        "tags": ["Sync Pairs"], "summary": "List all sync pairs with live status",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/sync-pairs/{id}": {
+      "get": {
+        "tags": ["Sync Pairs"], "summary": "Get a sync pair",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" }, "404": { "description": "Not found" } }
+      },
+      "put": {
+        "tags": ["Sync Pairs"], "summary": "Update a sync pair (partial)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SyncPairUpdate" } } } },
+        "responses": { "200": { "description": "Updated" }, "404": { "description": "Not found" } }
+      },
+      "delete": {
+        "tags": ["Sync Pairs"], "summary": "Delete a sync pair",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Deleted" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/api/sync-pairs/{id}/sync": {
+      "post": {
+        "tags": ["Sync Pairs"], "summary": "Trigger a one-shot sync",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "202": { "description": "Accepted" } }
+      }
+    },
+    "/api/sync-pairs/{id}/disable": {
+      "post": {
+        "tags": ["Sync Pairs"], "summary": "Toggle enable/disable sync pair",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Toggled" } }
+      }
+    },
+    "/api/sync-pairs/{id}/reset": {
+      "post": {
+        "tags": ["Sync Pairs"], "summary": "Reset cache and status for a sync pair",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Reset done" } }
+      }
+    },
+    "/api/sync-pairs/{id}/status": {
+      "get": {
+        "tags": ["Sync Pairs"], "summary": "Get live sync status and progress",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/sync-pairs/{id}/logs": {
+      "get": {
+        "tags": ["Sync Pairs"], "summary": "Get sync history logs",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      },
+      "delete": {
+        "tags": ["Sync Pairs"], "summary": "Clear sync history logs",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Cleared" } }
+      }
+    },
+    "/api/sync-pairs/{id}/stats": {
+      "get": {
+        "tags": ["Sync Pairs"], "summary": "Get aggregate sync statistics",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/export": {
+      "get": {
+        "tags": ["Config"], "summary": "Export all configs (buckets + sync pairs) as JSON",
+        "responses": { "200": { "description": "JSON export" } }
+      }
+    },
+    "/api/import": {
+      "post": {
+        "tags": ["Config"], "summary": "Import configs from JSON",
+        "parameters": [{ "name": "on_conflict", "in": "query", "schema": { "type": "string", "enum": ["skip", "replace", "new"], "default": "skip" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": { "200": { "description": "Import result" } }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": ["System"], "summary": "Health check",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "object", "properties": { "data": { "type": "object", "properties": { "status": { "type": "string" } } } } } } } } }
+      }
+    },
+    "/api/version": {
+      "get": {
+        "tags": ["System"], "summary": "Version info",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": ["Auth"], "summary": "Login with API key",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "password": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Login success" }, "401": { "description": "Unauthorized" } }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": ["Auth"], "summary": "Logout and clear session",
+        "responses": { "200": { "description": "Logged out" } }
+      }
+    },
+    "/api/setup": {
+      "post": {
+        "tags": ["Setup"], "summary": "Submit a setup wizard step",
+        "responses": { "200": { "description": "Step processed" } }
+      },
+      "get": {
+        "tags": ["Setup"], "summary": "Get setup wizard state",
+        "parameters": [{ "name": "session", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Setup state" } }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["System"], "summary": "Prometheus metrics endpoint",
+        "responses": { "200": { "description": "Prometheus text format metrics" } }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiResponse": {
+        "type": "object",
+        "properties": {
+          "data": { "type": "object" },
+          "error": { "type": "string" }
+        }
+      },
+      "BucketInput": {
+        "type": "object",
+        "required": ["name", "endpoint", "region", "access_key", "secret_key", "bucket_name"],
+        "properties": {
+          "name": { "type": "string", "description": "Human-readable name" },
+          "endpoint": { "type": "string", "example": "https://s3.cubbit.eu" },
+          "region": { "type": "string", "example": "eu-west-1" },
+          "access_key": { "type": "string" },
+          "secret_key": { "type": "string" },
+          "bucket_name": { "type": "string" },
+          "object_lock": { "type": "boolean", "default": false },
+          "versioning": { "type": "boolean", "default": false },
+          "retention_mode": { "type": "string", "enum": ["GOVERNANCE", "COMPLIANCE"] },
+          "retention_days": { "type": "integer" }
+        }
+      },
+      "SyncPairInput": {
+        "type": "object",
+        "required": ["name", "source_bucket_id", "target_bucket_id"],
+        "properties": {
+          "name": { "type": "string" },
+          "source_bucket_id": { "type": "string" },
+          "target_bucket_id": { "type": "string" },
+          "sync_interval": { "type": "integer", "default": 300 },
+          "worker_count": { "type": "integer", "default": 10 },
+          "max_get_ops_per_minute": { "type": "integer", "default": 0 },
+          "delete_propagation": { "type": "boolean", "default": true },
+          "target_storage_class": { "type": "string" },
+          "enabled": { "type": "boolean", "default": true },
+          "dry_run": { "type": "boolean", "default": false },
+          "webhook_url": { "type": "string" },
+          "webhook_events": { "type": "string" },
+          "cache_max_size_mb": { "type": "integer", "default": 50 },
+          "cache_ttl_days": { "type": "integer", "default": 30 }
+        }
+      },
+      "SyncPairUpdate": {
+        "type": "object",
+        "properties": {
+          "sync_interval": { "type": "integer" },
+          "worker_count": { "type": "integer" },
+          "max_get_ops_per_minute": { "type": "integer" },
+          "webhook_url": { "type": "string" },
+          "webhook_events": { "type": "string" },
+          "dry_run": { "type": "boolean" },
+          "cache_max_size_mb": { "type": "integer" },
+          "cache_ttl_days": { "type": "integer" }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" },
+      "cookieAuth": { "type": "apiKey", "in": "cookie", "name": "session" }
+    }
+  }
+}
