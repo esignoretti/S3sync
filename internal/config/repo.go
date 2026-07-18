@@ -3,6 +3,7 @@ package config
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -16,8 +17,10 @@ type Repository struct {
 
 func NewRepository(db *sql.DB) *Repository {
 	r := &Repository{db: db}
-	if mk := os.Getenv("BUCKETSYNC_MASTER_KEY"); mk != "" {
+	if mk := os.Getenv(MasterKeyEnv); mk != "" {
 		r.key = DeriveKey([]byte(mk))
+	} else {
+		slog.Warn("BUCKETSYNC_MASTER_KEY not set — S3 credentials stored in plaintext")
 	}
 	return r
 }

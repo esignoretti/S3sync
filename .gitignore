@@ -4,4 +4,5 @@
 *.db-shm
 *.test
 *.out
+.DS_Store
 tests/:memory:

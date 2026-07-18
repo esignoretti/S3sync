@@ -165,6 +165,4 @@ func (c *CacheCursor) Object() CachedObject {
 	return c.obj
 }
 
-func (c *CacheCursor) Err() error {
-	return c.err
-}
+

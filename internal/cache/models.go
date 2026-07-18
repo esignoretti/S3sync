@@ -9,6 +9,4 @@ type CachedObject struct {
 	Size         int64     `json:"size"`
 	LastModified time.Time `json:"last_modified"`
 	SyncedAt     time.Time `json:"synced_at"`
-	ErrorCount   int       `json:"error_count"`
-	LastError    string    `json:"last_error,omitempty"`
 }
