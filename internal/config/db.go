@@ -72,6 +72,8 @@ func migrate(db *sql.DB) error {
 		`ALTER TABLE sync_pairs ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sync_pairs ADD COLUMN webhook_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sync_pairs ADD COLUMN webhook_events TEXT NOT NULL DEFAULT 'error'`,
+		`ALTER TABLE sync_pairs ADD COLUMN cache_max_size_mb INTEGER NOT NULL DEFAULT 50`,
+		`ALTER TABLE sync_pairs ADD COLUMN cache_ttl_days INTEGER NOT NULL DEFAULT 30`,
 	}
 	for _, m := range migrations {
 		db.Exec(m) // ignore error if column already exists

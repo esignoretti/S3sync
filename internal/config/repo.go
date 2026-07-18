@@ -152,12 +152,14 @@ func (r *Repository) CreateSyncPair(p *SyncPair) error {
 		`INSERT INTO sync_pairs (id,name,source_bucket_id,target_bucket_id,
 		 sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,
 		 target_storage_class,enabled,dry_run,webhook_url,webhook_events,
+		 cache_max_size_mb,cache_ttl_days,
 		 last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.SourceBucketID, p.TargetBucketID,
 		p.SyncInterval, p.WorkerCount, p.MaxGetOpsPerMinute, boolInt(p.DeletePropagation),
 		nullStr(p.TargetStorageClass), boolInt(p.Enabled), boolInt(p.DryRun),
 		p.WebhookURL, p.WebhookEvents,
+		p.CacheMaxSizeMB, p.CacheTTLDays,
 		nullTimeRFC(p.LastSyncAt), p.LastSyncStatus,
 		p.ConsecutiveErrors, rfc(p.CreatedAt), rfc(p.UpdatedAt),
 	)
@@ -165,7 +167,7 @@ func (r *Repository) CreateSyncPair(p *SyncPair) error {
 }
 
 func (r *Repository) ListSyncPairs() ([]SyncPair, error) {
-	rows, err := r.db.Query(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs ORDER BY name`)
+	rows, err := r.db.Query(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,cache_max_size_mb,cache_ttl_days,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +176,7 @@ func (r *Repository) ListSyncPairs() ([]SyncPair, error) {
 }
 
 func (r *Repository) GetSyncPair(id string) (*SyncPair, error) {
-	row := r.db.QueryRow(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs WHERE id = ?`, id)
+	row := r.db.QueryRow(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,cache_max_size_mb,cache_ttl_days,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs WHERE id = ?`, id)
 	return scanSyncPair(row)
 }
 
@@ -184,11 +186,13 @@ func (r *Repository) UpdateSyncPair(p *SyncPair) error {
 		`UPDATE sync_pairs SET name=?,source_bucket_id=?,target_bucket_id=?,
 		 sync_interval=?,worker_count=?,max_get_ops_per_minute=?,delete_propagation=?,
 		 target_storage_class=?,enabled=?,dry_run=?,webhook_url=?,webhook_events=?,
+		 cache_max_size_mb=?,cache_ttl_days=?,
 		 last_sync_at=?,last_sync_status=?,consecutive_errors=?,updated_at=? WHERE id=?`,
 		p.Name, p.SourceBucketID, p.TargetBucketID,
 		p.SyncInterval, p.WorkerCount, p.MaxGetOpsPerMinute, boolInt(p.DeletePropagation),
 		nullStr(p.TargetStorageClass), boolInt(p.Enabled), boolInt(p.DryRun),
 		p.WebhookURL, p.WebhookEvents,
+		p.CacheMaxSizeMB, p.CacheTTLDays,
 		nullTimeRFC(p.LastSyncAt), p.LastSyncStatus,
 		p.ConsecutiveErrors, rfc(p.UpdatedAt), p.ID,
 	)
@@ -203,7 +207,6 @@ func (r *Repository) UpdateSyncPair(p *SyncPair) error {
 }
 
 func (r *Repository) DeleteSyncPair(id string) error {
-	r.db.Exec(`DELETE FROM sync_logs WHERE pair_id = ?`, id)
 	res, err := r.db.Exec(`DELETE FROM sync_pairs WHERE id = ?`, id)
 	if err != nil {
 		return err
@@ -226,6 +229,11 @@ func (r *Repository) CreateSyncLog(entry *SyncLogEntry) error {
 		entry.Succeeded, entry.Failed,
 		rfc(entry.StartedAt), rfc(entry.CompletedAt),
 	)
+	return err
+}
+
+func (r *Repository) ClearSyncLogs(pairID string) error {
+	_, err := r.db.Exec(`DELETE FROM sync_logs WHERE pair_id = ?`, pairID)
 	return err
 }
 
@@ -344,6 +352,7 @@ func scanSyncPairFromRow(s rowScanner) (*SyncPair, error) {
 	err := s.Scan(&p.ID, &p.Name, &p.SourceBucketID, &p.TargetBucketID,
 		&p.SyncInterval, &p.WorkerCount, &p.MaxGetOpsPerMinute, &dp,
 		&tsc, &en, &dr, &p.WebhookURL, &p.WebhookEvents,
+		&p.CacheMaxSizeMB, &p.CacheTTLDays,
 		&lsa, &p.LastSyncStatus,
 		&ce, &c, &u)
 	if err != nil {

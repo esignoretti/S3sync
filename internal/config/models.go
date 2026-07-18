@@ -32,6 +32,8 @@ type SyncPair struct {
 	DryRun             bool       `json:"dry_run"`
 	WebhookURL         string     `json:"webhook_url,omitempty"`
 	WebhookEvents      string     `json:"webhook_events,omitempty"`
+	CacheMaxSizeMB     int        `json:"cache_max_size_mb"`
+	CacheTTLDays       int        `json:"cache_ttl_days"`
 	LastSyncAt         *time.Time `json:"last_sync_at,omitempty"`
 	LastSyncStatus     string     `json:"last_sync_status"`
 	ConsecutiveErrors  int        `json:"consecutive_errors"`
