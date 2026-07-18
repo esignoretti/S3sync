@@ -39,6 +39,12 @@
                 <input type="text" id="edit-webhook-events" placeholder="error">
             </label>
             <label class="checkbox-label"><input type="checkbox" id="edit-dry-run"> Dry run (preview only)</label>
+            <label>Cache Max Size (MB, 0 = unlimited)
+                <input type="number" id="edit-cache-size" min="0" step="10" placeholder="50">
+            </label>
+            <label>Cache TTL (days, 0 = never prune)
+                <input type="number" id="edit-cache-ttl" min="0" placeholder="30">
+            </label>
             <div class="modal-actions">
                 <button class="btn btn-sm btn-secondary" onclick="closeEditModal()">Cancel</button>
                 <button class="btn btn-sm btn-primary" onclick="saveEdit()">Save</button>

@@ -138,7 +138,9 @@ async function pollStatus() {
             editBtn.dataset.webhookUrl = p.webhook_url || '';
             editBtn.dataset.webhookEvents = p.webhook_events || '';
             editBtn.dataset.dryRun = p.dry_run || false;
-            editBtn.addEventListener('click', () => openEditModal(editBtn.dataset.id, editBtn.dataset.interval, editBtn.dataset.workers, editBtn.dataset.maxOps, editBtn.dataset.webhookUrl, editBtn.dataset.webhookEvents, editBtn.dataset.dryRun));
+            editBtn.dataset.cacheSize = p.cache_max_size_mb != null ? p.cache_max_size_mb : 50;
+            editBtn.dataset.cacheTtl = p.cache_ttl_days != null ? p.cache_ttl_days : 30;
+            editBtn.addEventListener('click', () => openEditModal(editBtn.dataset.id, editBtn.dataset.interval, editBtn.dataset.workers, editBtn.dataset.maxOps, editBtn.dataset.webhookUrl, editBtn.dataset.webhookEvents, editBtn.dataset.dryRun, editBtn.dataset.cacheSize, editBtn.dataset.cacheTtl));
 
             // Stats
             let stats = card.appendChild(document.createElement('div'));
@@ -234,7 +236,7 @@ async function pollStatus() {
 }
 
 let editPairId = null;
-function openEditModal(pairId, interval, workers, maxOps, webhookUrl, webhookEvents, dryRun) {
+function openEditModal(pairId, interval, workers, maxOps, webhookUrl, webhookEvents, dryRun, cacheSize, cacheTtl) {
     editPairId = pairId;
     document.getElementById('edit-interval').value = interval || '';
     document.getElementById('edit-workers').value = workers || '';
@@ -242,6 +244,8 @@ function openEditModal(pairId, interval, workers, maxOps, webhookUrl, webhookEve
     document.getElementById('edit-webhook-url').value = webhookUrl || '';
     document.getElementById('edit-webhook-events').value = webhookEvents || '';
     document.getElementById('edit-dry-run').checked = dryRun === 'true';
+    document.getElementById('edit-cache-size').value = cacheSize || '';
+    document.getElementById('edit-cache-ttl').value = cacheTtl || '';
     document.getElementById('edit-modal').style.display = 'flex';
 }
 function closeEditModal() {
@@ -255,6 +259,8 @@ async function saveEdit() {
     let webhookUrl = document.getElementById('edit-webhook-url').value;
     let webhookEvents = document.getElementById('edit-webhook-events').value;
     let dryRun = document.getElementById('edit-dry-run').checked;
+    let cacheSize = parseInt(document.getElementById('edit-cache-size').value);
+    let cacheTtl = parseInt(document.getElementById('edit-cache-ttl').value);
     let body = {};
     if (!isNaN(interval)) body.sync_interval = interval;
     if (!isNaN(workers)) body.worker_count = workers;
@@ -262,6 +268,8 @@ async function saveEdit() {
     if (webhookUrl) body.webhook_url = webhookUrl;
     if (webhookEvents) body.webhook_events = webhookEvents;
     body.dry_run = dryRun;
+    if (!isNaN(cacheSize)) body.cache_max_size_mb = cacheSize;
+    if (!isNaN(cacheTtl)) body.cache_ttl_days = cacheTtl;
     try {
         await fetch('/api/sync-pairs/' + editPairId, {
             method: 'PUT',
@@ -283,8 +291,8 @@ function showErrorModal(pairId, pairName) {
             let res = await fetch('/api/sync-pairs/' + pairId + '/logs');
             let json = await res.json();
             let logs = json.data || json || [];
-            let errors = logs.filter(l => l.status === 'error' || l.error_msg);
             el.innerHTML = '';
+            let errors = logs.filter(l => l.status === 'error' || l.error_msg);
             if (errors.length === 0) {
                 el.textContent = 'No errors.';
                 return;

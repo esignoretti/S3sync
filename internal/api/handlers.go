@@ -171,6 +171,8 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 		WebhookURL         *string `json:"webhook_url"`
 		WebhookEvents      *string `json:"webhook_events"`
 		DryRun             *bool   `json:"dry_run"`
+		CacheMaxSizeMB     *int    `json:"cache_max_size_mb"`
+		CacheTTLDays       *int    `json:"cache_ttl_days"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
@@ -198,6 +200,12 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 	}
 	if in.DryRun != nil {
 		p.DryRun = *in.DryRun
+	}
+	if in.CacheMaxSizeMB != nil {
+		p.CacheMaxSizeMB = *in.CacheMaxSizeMB
+	}
+	if in.CacheTTLDays != nil {
+		p.CacheTTLDays = *in.CacheTTLDays
 	}
 	if err := s.repo.UpdateSyncPair(p); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
