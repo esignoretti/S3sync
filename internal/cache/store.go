@@ -3,6 +3,7 @@ package cache
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -111,6 +112,44 @@ func (s *Store) Clear(pairID string) error {
 		_, err := tx.CreateBucket(s.bucket(pairID))
 		return err
 	})
+}
+
+func (s *Store) PruneIfNeeded(pairID string, maxSizeMB, ttlDays int) (int64, error) {
+	if maxSizeMB <= 0 || ttlDays <= 0 {
+		return 0, nil
+	}
+	var removed int64
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(s.bucket(pairID))
+		if b == nil {
+			return nil
+		}
+		stats := b.Stats()
+		totalSize := stats.BranchAlloc + stats.LeafAlloc
+		maxBytes := maxSizeMB * 1024 * 1024
+		if int(totalSize) < maxBytes {
+			return nil
+		}
+		cutoff := time.Now().AddDate(0, 0, -ttlDays)
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var obj CachedObject
+			if err := json.Unmarshal(v, &obj); err != nil {
+				continue
+			}
+			if obj.SyncedAt.Before(cutoff) {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				removed++
+			}
+		}
+		return nil
+	})
+	if removed > 0 {
+		slog.Info("cache pruned", "pair", pairID, "removed", removed)
+	}
+	return removed, err
 }
 
 type CacheCursor struct {
