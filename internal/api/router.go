@@ -303,6 +303,9 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/sync-pairs/:id/stats", s.getSyncPairStats)
 		api.DELETE("/sync-pairs/:id/logs", s.clearSyncLogs)
 
+		api.GET("/export", s.exportConfig)
+		api.POST("/import", s.importConfig)
+
 		api.GET("/health", s.health)
 		api.GET("/version", s.version)
 

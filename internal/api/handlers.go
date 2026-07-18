@@ -346,6 +346,14 @@ func (s *Server) syncLogs(c *gin.Context) {
 	respond(c, http.StatusOK, logs)
 }
 
+func (s *Server) clearSyncLogs(c *gin.Context) {
+	if err := s.repo.ClearSyncLogs(c.Param("id")); err != nil {
+		respondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond(c, http.StatusOK, gin.H{"cleared": true})
+}
+
 func (s *Server) getSyncPairStats(c *gin.Context) {
 	stats, err := s.repo.GetPairStats(c.Param("id"))
 	if err != nil {
@@ -400,6 +408,260 @@ func (s *Server) setupState(c *gin.Context) {
 		"step":     state.Step.String(),
 		"step_num": int(state.Step),
 		"done":     state.Step >= config.StepDone,
+	})
+}
+
+type importBucket struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Endpoint      string `json:"endpoint"`
+	Region        string `json:"region"`
+	AccessKey     string `json:"access_key"`
+	SecretKey     string `json:"secret_key"`
+	BucketName    string `json:"bucket_name"`
+	ObjectLock    bool   `json:"object_lock"`
+	Versioning    bool   `json:"versioning"`
+	RetentionMode string `json:"retention_mode,omitempty"`
+	RetentionDays int    `json:"retention_days,omitempty"`
+}
+
+type importSyncPair struct {
+	Name               string `json:"name"`
+	SourceBucketID     string `json:"source_bucket_id"`
+	TargetBucketID     string `json:"target_bucket_id"`
+	SyncInterval       int    `json:"sync_interval"`
+	WorkerCount        int    `json:"worker_count"`
+	MaxGetOpsPerMinute int    `json:"max_get_ops_per_minute"`
+	DeletePropagation  bool   `json:"delete_propagation"`
+	TargetStorageClass string `json:"target_storage_class,omitempty"`
+	Enabled            bool   `json:"enabled"`
+	DryRun             bool   `json:"dry_run"`
+	WebhookURL         string `json:"webhook_url,omitempty"`
+	WebhookEvents      string `json:"webhook_events,omitempty"`
+	CacheMaxSizeMB     int    `json:"cache_max_size_mb"`
+	CacheTTLDays       int    `json:"cache_ttl_days"`
+}
+
+type importPayload struct {
+	Version   int              `json:"version"`
+	Buckets   []importBucket   `json:"buckets"`
+	SyncPairs []importSyncPair `json:"sync_pairs"`
+}
+
+type importResult struct {
+	BucketsCreated  int      `json:"buckets_created"`
+	BucketsSkipped  int      `json:"buckets_skipped"`
+	BucketsReplaced int      `json:"buckets_replaced"`
+	PairsCreated    int      `json:"pairs_created"`
+	PairsSkipped    int      `json:"pairs_skipped"`
+	PairsReplaced   int      `json:"pairs_replaced"`
+	Errors          []string `json:"errors"`
+}
+
+func (s *Server) importConfig(c *gin.Context) {
+	conflict := c.DefaultQuery("on_conflict", "skip")
+
+	var in importPayload
+	if err := c.ShouldBindJSON(&in); err != nil {
+		respondError(c, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	if len(in.Buckets) == 0 && len(in.SyncPairs) == 0 {
+		respondError(c, http.StatusBadRequest, "no buckets or sync pairs to import")
+		return
+	}
+	for _, b := range in.Buckets {
+		if b.Name == "" || b.Endpoint == "" || b.Region == "" || b.AccessKey == "" || b.SecretKey == "" {
+			respondError(c, http.StatusBadRequest, "bucket "+b.Name+" has missing required fields")
+			return
+		}
+	}
+	for _, p := range in.SyncPairs {
+		if p.Name == "" {
+			respondError(c, http.StatusBadRequest, "sync pair has empty name")
+			return
+		}
+	}
+
+	result := &importResult{}
+	bucketIDMap := make(map[string]string)
+
+	for _, b := range in.Buckets {
+		existing, err := s.repo.GetBucketByName(b.Name)
+		if err == nil && existing != nil {
+			switch conflict {
+			case "skip":
+				result.BucketsSkipped++
+				bucketIDMap[b.ID] = existing.ID
+				continue
+			case "replace":
+				existing.Endpoint = b.Endpoint
+				existing.Region = b.Region
+				existing.AccessKey = b.AccessKey
+				existing.SecretKey = b.SecretKey
+				existing.BucketName = b.BucketName
+				existing.ObjectLock = b.ObjectLock
+				existing.Versioning = b.Versioning
+				existing.RetentionMode = b.RetentionMode
+				existing.RetentionDays = b.RetentionDays
+				if err := s.repo.UpdateBucket(existing); err != nil {
+					result.Errors = append(result.Errors, "update bucket "+b.Name+": "+err.Error())
+					continue
+				}
+				result.BucketsReplaced++
+				bucketIDMap[b.ID] = existing.ID
+				continue
+			case "new":
+			}
+		}
+		nb := &config.Bucket{
+			Name:          b.Name,
+			Endpoint:      b.Endpoint,
+			Region:        b.Region,
+			AccessKey:     b.AccessKey,
+			SecretKey:     b.SecretKey,
+			BucketName:    b.BucketName,
+			ObjectLock:    b.ObjectLock,
+			Versioning:    b.Versioning,
+			RetentionMode: b.RetentionMode,
+			RetentionDays: b.RetentionDays,
+		}
+		if err := s.repo.CreateBucket(nb); err != nil {
+			result.Errors = append(result.Errors, "create bucket "+b.Name+": "+err.Error())
+			continue
+		}
+		result.BucketsCreated++
+		bucketIDMap[b.ID] = nb.ID
+	}
+
+	for _, p := range in.SyncPairs {
+		srcID, ok := bucketIDMap[p.SourceBucketID]
+		if !ok {
+			result.Errors = append(result.Errors, "sync pair "+p.Name+": source bucket ID "+p.SourceBucketID+" not found")
+			continue
+		}
+		tgtID, ok := bucketIDMap[p.TargetBucketID]
+		if !ok {
+			result.Errors = append(result.Errors, "sync pair "+p.Name+": target bucket ID "+p.TargetBucketID+" not found")
+			continue
+		}
+
+		existingPairs, _ := s.repo.ListSyncPairs()
+		var existing *config.SyncPair
+		for i := range existingPairs {
+			if existingPairs[i].Name == p.Name {
+				existing = &existingPairs[i]
+				break
+			}
+		}
+
+		if existing != nil {
+			switch conflict {
+			case "skip":
+				result.PairsSkipped++
+				continue
+			case "replace":
+				existing.SourceBucketID = srcID
+				existing.TargetBucketID = tgtID
+				existing.SyncInterval = p.SyncInterval
+				existing.WorkerCount = p.WorkerCount
+				existing.MaxGetOpsPerMinute = p.MaxGetOpsPerMinute
+				existing.DeletePropagation = p.DeletePropagation
+				existing.TargetStorageClass = p.TargetStorageClass
+				existing.Enabled = p.Enabled
+				existing.DryRun = p.DryRun
+				existing.WebhookURL = p.WebhookURL
+				existing.WebhookEvents = p.WebhookEvents
+				existing.CacheMaxSizeMB = p.CacheMaxSizeMB
+				existing.CacheTTLDays = p.CacheTTLDays
+				if err := s.repo.UpdateSyncPair(existing); err != nil {
+					result.Errors = append(result.Errors, "update sync pair "+p.Name+": "+err.Error())
+					continue
+				}
+				result.PairsReplaced++
+				continue
+			case "new":
+			}
+		}
+
+		np := &config.SyncPair{
+			Name:               p.Name,
+			SourceBucketID:     srcID,
+			TargetBucketID:     tgtID,
+			SyncInterval:       p.SyncInterval,
+			WorkerCount:        p.WorkerCount,
+			MaxGetOpsPerMinute: p.MaxGetOpsPerMinute,
+			DeletePropagation:  p.DeletePropagation,
+			TargetStorageClass: p.TargetStorageClass,
+			Enabled:            p.Enabled,
+			DryRun:             p.DryRun,
+			WebhookURL:         p.WebhookURL,
+			WebhookEvents:      p.WebhookEvents,
+			CacheMaxSizeMB:     p.CacheMaxSizeMB,
+			CacheTTLDays:       p.CacheTTLDays,
+		}
+		if err := s.repo.CreateSyncPair(np); err != nil {
+			result.Errors = append(result.Errors, "create sync pair "+p.Name+": "+err.Error())
+			continue
+		}
+		result.PairsCreated++
+	}
+
+	if len(result.Errors) > 0 {
+		c.JSON(http.StatusOK, result)
+		return
+	}
+	respond(c, http.StatusOK, result)
+}
+
+func (s *Server) exportConfig(c *gin.Context) {
+	buckets, err := s.repo.ListBuckets()
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pairs, err := s.repo.ListSyncPairs()
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type bucketJSON struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		Endpoint      string `json:"endpoint"`
+		Region        string `json:"region"`
+		AccessKey     string `json:"access_key"`
+		SecretKey     string `json:"secret_key"`
+		BucketName    string `json:"bucket_name"`
+		ObjectLock    bool   `json:"object_lock"`
+		Versioning    bool   `json:"versioning"`
+		RetentionMode string `json:"retention_mode,omitempty"`
+		RetentionDays int    `json:"retention_days,omitempty"`
+		CreatedAt     string `json:"created_at"`
+		UpdatedAt     string `json:"updated_at"`
+	}
+	bjs := make([]bucketJSON, len(buckets))
+	for i, b := range buckets {
+		bjs[i] = bucketJSON{
+			ID: b.ID, Name: b.Name, Endpoint: b.Endpoint, Region: b.Region,
+			AccessKey: b.AccessKey, SecretKey: b.SecretKey,
+			BucketName: b.BucketName, ObjectLock: b.ObjectLock, Versioning: b.Versioning,
+			RetentionMode: b.RetentionMode, RetentionDays: b.RetentionDays,
+			CreatedAt: b.CreatedAt.Format(time.RFC3339), UpdatedAt: b.UpdatedAt.Format(time.RFC3339),
+		}
+	}
+
+	if len(pairs) == 0 {
+		pairs = []config.SyncPair{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"version":     1,
+		"exported_at": time.Now().UTC().Format(time.RFC3339),
+		"buckets":     bjs,
+		"sync_pairs":  pairs,
 	})
 }
 
