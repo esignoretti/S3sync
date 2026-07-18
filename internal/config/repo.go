@@ -406,11 +406,15 @@ func decryptCreds(key []byte, b *Bucket) {
 	if b.AccessKey != "" {
 		if d, err := Decrypt(b.AccessKey, key); err == nil {
 			b.AccessKey = string(d)
+		} else {
+			slog.Warn("decrypt access key failed", "bucket", b.Name, "error", err)
 		}
 	}
 	if b.SecretKey != "" {
 		if d, err := Decrypt(b.SecretKey, key); err == nil {
 			b.SecretKey = string(d)
+		} else {
+			slog.Warn("decrypt secret key failed", "bucket", b.Name, "error", err)
 		}
 	}
 }

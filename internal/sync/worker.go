@@ -96,11 +96,12 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 
 	src := fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)
 	needCopy := true
-	err := retryS3(reqCtx, "HeadObject", func(c context.Context) error {
-		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+	// HeadObject on target — 404 means needs copy (not an error)
+	headErr := func() error {
+		if err := wp.throttler.WaitLog(reqCtx, wp.sourceBucket); err != nil {
 			return err
 		}
-		headOut, err := wp.client.HeadObject(c, &s3.HeadObjectInput{
+		headOut, err := wp.client.HeadObject(reqCtx, &s3.HeadObjectInput{
 			Bucket: &wp.targetBucket, Key: &a.Key,
 		})
 		if err != nil {
@@ -110,9 +111,12 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 			needCopy = false
 		}
 		return nil
-	}, 3)
-	if err != nil {
-		return err
+	}()
+	if headErr != nil {
+		var nf *types.NotFound
+		if !errors.As(headErr, &nf) {
+			return headErr
+		}
 	}
 	if !needCopy {
 		slog.Debug("skip unchanged", "key", a.Key)
@@ -152,7 +156,7 @@ func (wp *WorkerPool) deleteObject(ctx context.Context, a SyncAction) error {
 
 func retryS3(ctx context.Context, label string, fn func(context.Context) error, maxAttempts int) error {
 	var err error
-	delay := time.Second
+	delay := 500 * time.Millisecond
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
 			slog.Debug("retry", "label", label, "attempt", attempt, "delay_ms", delay.Milliseconds())
@@ -164,6 +168,9 @@ func retryS3(ctx context.Context, label string, fn func(context.Context) error, 
 				return ctx.Err()
 			}
 			delay *= 2
+			if delay > 8*time.Second {
+				delay = 8 * time.Second
+			}
 		}
 		err = fn(ctx)
 		if err == nil {

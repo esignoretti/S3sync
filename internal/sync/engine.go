@@ -300,12 +300,10 @@ func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastE
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	p := Progress{}
-	if e.progress != nil {
-		total, completed, failed := e.progress.Snapshot()
-		p.Total = total
-		p.Completed = completed
-		p.Failed = failed
-	}
+	total, completed, failed := e.progress.Snapshot()
+	p.Total = total
+	p.Completed = completed
+	p.Failed = failed
 	if !e.running && p.Total == 0 && p.Completed == 0 && e.lastResult != nil {
 		p.Total = e.lastResult.Total
 		p.Completed = e.lastResult.Completed

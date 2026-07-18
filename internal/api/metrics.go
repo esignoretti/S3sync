@@ -36,20 +36,6 @@ var (
 	}, []string{"pair_id", "pair_name"})
 )
 
-func RegisterSyncPairMetrics(pairID, pairName string) {
-	// Metrics are created on first use — no explicit registration needed.
-	// This function exists for symmetry with Unregister.
-}
-
-func UnregisterSyncPairMetrics(pairID string) {
-	labels := prometheus.Labels{"pair_id": pairID}
-	syncRunsTotal.DeletePartialMatch(labels)
-	objectsCopiedTotal.DeletePartialMatch(labels)
-	objectsDeletedTotal.DeletePartialMatch(labels)
-	bytesTransferredTotal.DeletePartialMatch(labels)
-	syncDurationSeconds.DeletePartialMatch(labels)
-}
-
 func RecordSyncMetrics(pairID, pairName string, succeeded bool, copied, deleted, bytes int64, duration float64) {
 	status := "success"
 	if !succeeded {

@@ -49,7 +49,7 @@ func StreamingDiff(
 		defer close(pages)
 		var token *string
 		var prevToken string
-		var seenMaxKey string
+		pageCount := 0
 		for {
 			out, err := listPage(ctx, token)
 			if err != nil {
@@ -59,6 +59,7 @@ func StreamingDiff(
 			if len(out.Contents) == 0 {
 				return
 			}
+			pageCount++
 			isTruncated := out.IsTruncated != nil && *out.IsTruncated
 			nextToken := ""
 			if out.NextContinuationToken != nil {
@@ -68,12 +69,8 @@ func StreamingDiff(
 			if nextToken != "" && nextToken == prevToken {
 				last = true
 			}
-			firstKey := aws.ToString(out.Contents[0].Key)
-			if seenMaxKey != "" && firstKey <= seenMaxKey {
+			if pageCount > 10000 {
 				last = true
-			}
-			if lastKey := aws.ToString(out.Contents[len(out.Contents)-1].Key); lastKey > seenMaxKey {
-				seenMaxKey = lastKey
 			}
 			prevToken = nextToken
 			select {

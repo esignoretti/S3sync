@@ -26,13 +26,32 @@ func respondError(c *gin.Context, status int, msg string) {
 
 // --- Buckets ---
 
+type bucketInput struct {
+	Name          string `json:"name"`
+	Endpoint      string `json:"endpoint"`
+	Region        string `json:"region"`
+	AccessKey     string `json:"access_key"`
+	SecretKey     string `json:"secret_key"`
+	BucketName    string `json:"bucket_name"`
+	ObjectLock    bool   `json:"object_lock"`
+	Versioning    bool   `json:"versioning"`
+	RetentionMode string `json:"retention_mode,omitempty"`
+	RetentionDays int    `json:"retention_days,omitempty"`
+}
+
 func (s *Server) createBucket(c *gin.Context) {
-	var b config.Bucket
-	if err := c.ShouldBindJSON(&b); err != nil {
+	var in bucketInput
+	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.repo.CreateBucket(&b); err != nil {
+	b := &config.Bucket{
+		Name: in.Name, Endpoint: in.Endpoint, Region: in.Region,
+		AccessKey: in.AccessKey, SecretKey: in.SecretKey,
+		BucketName: in.BucketName, ObjectLock: in.ObjectLock, Versioning: in.Versioning,
+		RetentionMode: in.RetentionMode, RetentionDays: in.RetentionDays,
+	}
+	if err := s.repo.CreateBucket(b); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -61,17 +80,35 @@ func (s *Server) getBucket(c *gin.Context) {
 }
 
 func (s *Server) updateBucket(c *gin.Context) {
-	var b config.Bucket
-	if err := c.ShouldBindJSON(&b); err != nil {
+	var in bucketInput
+	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	b.ID = c.Param("id")
-	if err := s.repo.UpdateBucket(&b); err != nil {
+	existing, err := s.repo.GetBucket(c.Param("id"))
+	if err != nil {
+		respondError(c, http.StatusNotFound, err.Error())
+		return
+	}
+	existing.Name = in.Name
+	existing.Endpoint = in.Endpoint
+	existing.Region = in.Region
+	existing.BucketName = in.BucketName
+	existing.ObjectLock = in.ObjectLock
+	existing.Versioning = in.Versioning
+	existing.RetentionMode = in.RetentionMode
+	existing.RetentionDays = in.RetentionDays
+	if in.AccessKey != "" {
+		existing.AccessKey = in.AccessKey
+	}
+	if in.SecretKey != "" {
+		existing.SecretKey = in.SecretKey
+	}
+	if err := s.repo.UpdateBucket(existing); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respond(c, http.StatusOK, b)
+	respond(c, http.StatusOK, existing)
 }
 
 func (s *Server) deleteBucket(c *gin.Context) {
@@ -640,8 +677,6 @@ func (s *Server) exportConfig(c *gin.Context) {
 		Name          string `json:"name"`
 		Endpoint      string `json:"endpoint"`
 		Region        string `json:"region"`
-		AccessKey     string `json:"access_key"`
-		SecretKey     string `json:"secret_key"`
 		BucketName    string `json:"bucket_name"`
 		ObjectLock    bool   `json:"object_lock"`
 		Versioning    bool   `json:"versioning"`
@@ -654,7 +689,6 @@ func (s *Server) exportConfig(c *gin.Context) {
 	for i, b := range buckets {
 		bjs[i] = bucketJSON{
 			ID: b.ID, Name: b.Name, Endpoint: b.Endpoint, Region: b.Region,
-			AccessKey: b.AccessKey, SecretKey: b.SecretKey,
 			BucketName: b.BucketName, ObjectLock: b.ObjectLock, Versioning: b.Versioning,
 			RetentionMode: b.RetentionMode, RetentionDays: b.RetentionDays,
 			CreatedAt: b.CreatedAt.Format(time.RFC3339), UpdatedAt: b.UpdatedAt.Format(time.RFC3339),

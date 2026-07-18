@@ -1,9 +1,21 @@
 {{template "layout" .}}
 {{define "content"}}
 <h1 class="page-title">Sync History: {{.Name}}</h1>
+<div style="margin-bottom:12px;display:flex;gap:8px">
+  <a href="/" class="btn btn-sm btn-secondary">Back to Dashboard</a>
+  <button class="btn btn-sm btn-danger" onclick="clearHistory()">Clear History</button>
+</div>
 <div id="history-table"><p>Loading...</p></div>
-<a href="/" class="btn btn-sm btn-secondary" style="margin-top:16px">Back to Dashboard</a>
 <script>
+async function clearHistory() {
+  if (!confirm('Delete all sync history for this pair?')) return;
+  try {
+    await fetch('/api/sync-pairs/' + '{{.PairID}}' + '/logs', { method: 'DELETE' });
+    loadHistory();
+  } catch(e) {
+    alert('Failed to clear history.');
+  }
+}
 async function loadHistory() {
   let pairId = '{{.PairID}}';
   let el = document.getElementById('history-table');

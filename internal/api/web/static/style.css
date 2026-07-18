@@ -60,7 +60,7 @@ body {
 
 .pair-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
     gap: 16px;
 }
 
@@ -71,7 +71,7 @@ body {
     padding: 20px;
     display: flex;
     flex-direction: column;
-    min-height: 320px;
+    min-height: 330px;
 }
 
 .pair-header {
@@ -159,8 +159,8 @@ body {
 .nav-brand a { color: var(--blue); text-decoration: none; }
 
 /* Pair action buttons */
-.pair-actions { display: flex; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--hairline); flex-shrink: 0; }
-.btn-sm { padding: 4px 12px; font-size: 12px; }
+.pair-actions { display: flex; gap: 4px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--hairline); flex-shrink: 0; }
+.btn-sm { padding: 4px 8px; font-size: 11px; }
 .btn-danger { background: var(--red); color: white; }
 .btn-danger:hover { background: #d53b4f; }
 .btn-danger:disabled { background: var(--grey); cursor: not-allowed; opacity: 0.6; }

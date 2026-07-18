@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -23,6 +24,21 @@ var (
 func init() {
 	apiKey = os.Getenv("S3SYNC_API_KEY")
 	authEnabled = apiKey != ""
+	go sessionCleanup()
+}
+
+func sessionCleanup() {
+	for {
+		time.Sleep(10 * time.Minute)
+		sessionsMu.Lock()
+		now := time.Now()
+		for token, exp := range sessions {
+			if now.After(exp) {
+				delete(sessions, token)
+			}
+		}
+		sessionsMu.Unlock()
+	}
 }
 
 func (s *Server) loginHandler(c *gin.Context) {
@@ -36,12 +52,17 @@ func (s *Server) loginHandler(c *gin.Context) {
 		return
 	}
 	token := make([]byte, 32)
-	rand.Read(token)
+	if _, err := rand.Read(token); err != nil {
+		slog.Error("session token generation failed", "error", err)
+		loginTmpl.ExecuteTemplate(c.Writer, "layout.html", gin.H{"Error": "Internal error", "title": "S3sync — Sign in"})
+		return
+	}
 	sessionToken := hex.EncodeToString(token)
 	sessionsMu.Lock()
 	sessions[sessionToken] = time.Now().Add(24 * time.Hour)
 	sessionsMu.Unlock()
-	c.SetCookie("s3sync_token", sessionToken, 86400, "/", "", false, true)
+	secure := c.Request.TLS != nil
+	c.SetCookie("s3sync_token", sessionToken, 86400, "/", "", secure, true)
 	c.Redirect(http.StatusFound, "/")
 }
 

@@ -26,8 +26,8 @@ var bucketAddCmd = &cobra.Command{
 		endpoint, _ := cmd.Flags().GetString("endpoint")
 		region, _ := cmd.Flags().GetString("region")
 		bucketName, _ := cmd.Flags().GetString("bucket-name")
-		accessKey, _ := cmd.Flags().GetString("access-key")
-		secretKey, _ := cmd.Flags().GetString("secret-key")
+		accessKey := getFlagOrEnv(cmd, "access-key", "S3SYNC_ACCESS_KEY")
+		secretKey := getFlagOrEnv(cmd, "secret-key", "S3SYNC_SECRET_KEY")
 		objectLock, _ := cmd.Flags().GetBool("object-lock")
 		versioning, _ := cmd.Flags().GetBool("versioning")
 		retentionMode, _ := cmd.Flags().GetString("retention-mode")
@@ -186,4 +186,12 @@ func init() {
 
 	bucketCmd.AddCommand(bucketAddCmd, bucketListCmd, bucketGetCmd, bucketUpdateCmd, bucketDeleteCmd)
 	rootCmd.AddCommand(bucketCmd)
+}
+
+func getFlagOrEnv(cmd *cobra.Command, flag, envKey string) string {
+	if cmd.Flags().Changed(flag) {
+		v, _ := cmd.Flags().GetString(flag)
+		return v
+	}
+	return os.Getenv(envKey)
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"text/tabwriter"
+	"time"
 
 	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/esignoretti/S3sync/internal/sync"
@@ -184,8 +185,10 @@ var pairSyncCmd = &cobra.Command{
 		}
 		defer close()
 
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
 		cacheDir := filepath.Join(defaultConfigDir(), "cache.db")
-		return sync.RunOneShot(context.Background(), repo, args[0], cacheDir)
+		return sync.RunOneShot(ctx, repo, args[0], cacheDir)
 	},
 }
 
