@@ -56,6 +56,9 @@ type Engine struct {
 	lastResult    *Progress
 	lastSucceeded int
 	lastFailed    int
+	lastCopied    int64
+	lastDeleted   int64
+	lastBytes     int64
 	cancel        context.CancelFunc
 
 	setupOnce sync.Once
@@ -200,6 +203,22 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("diff: %w", diffErr)
 	}
 
+	var copiedCount, deletedCount int64
+	var totalBytes int64
+	for _, a := range succeeded {
+		if a.Type == ActionCopy {
+			copiedCount++
+		} else if a.Type == ActionDelete {
+			deletedCount++
+		}
+		totalBytes += a.Size
+	}
+	e.mu.Lock()
+	e.lastCopied = copiedCount
+	e.lastDeleted = deletedCount
+	e.lastBytes = totalBytes
+	e.mu.Unlock()
+
 	now := time.Now().UTC()
 	cached := make([]*cache.CachedObject, 0, len(succeeded))
 	for _, a := range succeeded {
@@ -299,6 +318,12 @@ func (e *Engine) LastResult() (succeeded, failed int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.lastSucceeded, e.lastFailed
+}
+
+func (e *Engine) LastTransfer() (copied, deleted, bytes int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastCopied, e.lastDeleted, e.lastBytes
 }
 
 func ptr[T any](v T) *T {

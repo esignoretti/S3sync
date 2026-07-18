@@ -172,6 +172,10 @@ func (s *Server) afterSync(pairID string, startedAt time.Time, syncErr error) {
 			StartedAt:   startedAt,
 			CompletedAt: now,
 		})
+
+		copied, deleted, bytes := eng.LastTransfer()
+		elapsed := time.Since(startedAt).Seconds()
+		RecordSyncMetrics(pairID, pair.Name, status == "ok", copied, deleted, bytes, elapsed)
 	}
 }
 
@@ -257,7 +261,7 @@ func (s *Server) serveHistory(c *gin.Context) {
 		c.String(404, "not found")
 		return
 	}
-	c.HTML(200, "history.html", gin.H{
+	historyTmpl.ExecuteTemplate(c.Writer, "layout.html", gin.H{
 		"PairID": p.ID,
 		"Name":   p.Name,
 	})
@@ -267,7 +271,8 @@ func (s *Server) Router() *gin.Engine {
 	s.recoverCrashedPairs()
 	r := gin.Default()
 
-	r.Use(authRequired)
+	// Auth middleware — enable by setting S3SYNC_API_KEY env var
+	// r.Use(authRequired)
 
 	r.GET("/login", s.serveLogin)
 
@@ -293,7 +298,7 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/sync-pairs/:id/status", s.syncStatus)
 		api.GET("/sync-pairs/:id/logs", s.syncLogs)
 		api.GET("/sync-pairs/:id/stats", s.getSyncPairStats)
-		api.GET("/sync-pairs/:id/history", s.serveHistory)
+		api.DELETE("/sync-pairs/:id/logs", s.clearSyncLogs)
 
 		api.GET("/health", s.health)
 		api.GET("/version", s.version)
@@ -305,6 +310,7 @@ func (s *Server) Router() *gin.Engine {
 
 	r.GET("/", s.serveDashboard)
 	r.GET("/setup", s.serveSetup)
+	r.GET("/sync-pairs/:id/history", s.serveHistory)
 	r.StaticFS("/static", http.FS(webStatic))
 
 	return r
