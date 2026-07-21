@@ -49,7 +49,7 @@ func StreamingDiff(
 		defer close(pages)
 		var token *string
 		var prevToken string
-		pageCount := 0
+		var seenMaxKey string
 		for {
 			out, err := listPage(ctx, token)
 			if err != nil {
@@ -59,7 +59,6 @@ func StreamingDiff(
 			if len(out.Contents) == 0 {
 				return
 			}
-			pageCount++
 			isTruncated := out.IsTruncated != nil && *out.IsTruncated
 			nextToken := ""
 			if out.NextContinuationToken != nil {
@@ -69,8 +68,12 @@ func StreamingDiff(
 			if nextToken != "" && nextToken == prevToken {
 				last = true
 			}
-			if pageCount > 10000 {
+			firstKey := aws.ToString(out.Contents[0].Key)
+			if seenMaxKey != "" && firstKey <= seenMaxKey {
 				last = true
+			}
+			if lastKey := aws.ToString(out.Contents[len(out.Contents)-1].Key); lastKey > seenMaxKey {
+				seenMaxKey = lastKey
 			}
 			prevToken = nextToken
 			select {
@@ -97,6 +100,7 @@ func StreamingDiff(
 	var pageIdx int
 	var pageLast bool
 	var listDone bool
+	var listErr error
 
 	nextListObj := func() (*s3types.Object, bool) {
 		if listDone {
@@ -107,14 +111,25 @@ func StreamingDiff(
 			case p, ok := <-pages:
 				if !ok {
 					listDone = true
+					// When pages closes, the fetcher may have sent an error.
+					// Prefer errCh over silent exhaustion.
+					select {
+					case err := <-errCh:
+						listErr = err
+					default:
+					}
 					return nil, false
 				}
 				currentPage = p.objs
 				pageIdx = 0
 				pageLast = p.last
-			case <-errCh:
+			case err := <-errCh:
+				listErr = err
+				listDone = true
 				return nil, false
 			case <-ctx.Done():
+				listErr = ctx.Err()
+				listDone = true
 				return nil, false
 			}
 		}
@@ -132,6 +147,13 @@ func StreamingDiff(
 	for listHasMore || cacheHasMore {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+
+		// Check for async fetch error without blocking
+		select {
+		case err := <-errCh:
+			return err
+		default:
 		}
 
 		if listHasMore && (!cacheHasMore || keyLt(aws.ToString(listObj.Key), cacheCur.Key())) {
@@ -160,7 +182,13 @@ func StreamingDiff(
 		}
 	}
 
-	return nil
+	// Drain any async fetch error that wasn't caught during the loop
+	select {
+	case err := <-errCh:
+		return err
+	default:
+	}
+	return listErr
 }
 
 func keyLt(a, b string) bool {
