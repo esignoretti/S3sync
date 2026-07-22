@@ -200,6 +200,25 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	diffErr := <-diffErrCh
 	slog.Info("diff completed", "pair", e.pair.Name, "err", diffErr)
 	closeCur()
+
+	// Cache succeeded actions regardless of diff error.
+	// Without this, a partial listing error discards all pool work and
+	// the next run starts from scratch — infinite cycle on large buckets.
+	if len(succeeded) > 0 {
+		now := time.Now().UTC()
+		cached := make([]*cache.CachedObject, 0, len(succeeded))
+		for _, a := range succeeded {
+			cached = append(cached, &cache.CachedObject{
+				PairID: e.pair.ID, Key: a.Key,
+				ETag: a.ETag, Size: a.Size,
+				LastModified: a.LastModified, SyncedAt: now,
+			})
+		}
+		if err := e.store.PutMany(cached); err != nil {
+			slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
+		}
+	}
+
 	if diffErr != nil {
 		e.setResult("error", fmt.Sprintf("diff: %v", diffErr))
 		return fmt.Errorf("diff: %w", diffErr)
@@ -220,19 +239,6 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.lastDeleted = deletedCount
 	e.lastBytes = totalBytes
 	e.mu.Unlock()
-
-	now := time.Now().UTC()
-	cached := make([]*cache.CachedObject, 0, len(succeeded))
-	for _, a := range succeeded {
-		cached = append(cached, &cache.CachedObject{
-			PairID: e.pair.ID, Key: a.Key,
-			ETag: a.ETag, Size: a.Size,
-			LastModified: a.LastModified, SyncedAt: now,
-		})
-	}
-	if err := e.store.PutMany(cached); err != nil {
-		slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
-	}
 
 	if e.pair.CacheMaxSizeMB > 0 || e.pair.CacheTTLDays > 0 {
 		if _, pruneErr := e.store.PruneIfNeeded(e.pair.ID, e.pair.CacheMaxSizeMB, e.pair.CacheTTLDays); pruneErr != nil {
@@ -258,6 +264,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.lastRun = time.Now()
 
 	if e.pair.WebhookURL != "" {
+		completedAt := time.Now().UTC().Format(time.RFC3339)
 		go func() {
 			p := WebhookPayload{
 				Event:             "sync_completed",
@@ -269,7 +276,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 				Succeeded:         succeededCount,
 				Failed:            failed,
 				StartedAt:         startTime.UTC().Format(time.RFC3339),
-				CompletedAt:       now.Format(time.RFC3339),
+				CompletedAt:       completedAt,
 				Source:            e.src.BucketName,
 				Target:            e.tgt.BucketName,
 			}
