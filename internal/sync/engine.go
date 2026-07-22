@@ -102,8 +102,10 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.lastError = ""
 	e.mu.Unlock()
 
-	timeout := 5 * time.Minute
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	// No global timeout — per-request 30s timeouts handle hang protection.
+	// Large buckets need unbounded listing + copy time. The caller's context
+	// (e.g. s.rootCtx from serve mode) handles shutdown.
+	ctx, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	if e.cancel != nil {
 		e.cancel()
