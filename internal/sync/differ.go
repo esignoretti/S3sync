@@ -2,6 +2,8 @@ package sync
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -49,33 +51,48 @@ func StreamingDiff(
 		defer close(pages)
 		var token *string
 		var prevToken string
+		pageNum := 0
 		var seenMaxKey string
+		const maxPages = 100000
 		for {
+			if pageNum >= maxPages {
+				errCh <- fmt.Errorf("list: exceeded %d pages", maxPages)
+				return
+			}
 			out, err := listPage(ctx, token)
 			if err != nil {
 				errCh <- err
 				return
 			}
 			if len(out.Contents) == 0 {
+				slog.Debug("list: empty page, done", "page", pageNum)
 				return
 			}
+			pageNum++
 			isTruncated := out.IsTruncated != nil && *out.IsTruncated
 			nextToken := ""
 			if out.NextContinuationToken != nil {
 				nextToken = *out.NextContinuationToken
 			}
+			firstKey := aws.ToString(out.Contents[0].Key)
+			lastKey := aws.ToString(out.Contents[len(out.Contents)-1].Key)
+
 			last := !isTruncated || nextToken == "" || len(out.Contents) < maxS3Keys
 			if nextToken != "" && nextToken == prevToken {
+				slog.Warn("list: same token twice, terminating", "page", pageNum, "token", prevToken)
 				last = true
 			}
-			firstKey := aws.ToString(out.Contents[0].Key)
+			// Detect Cubbit DS3 regression: unique continuation token but
+			// same page content (first key hasn't advanced past previous max).
 			if seenMaxKey != "" && firstKey <= seenMaxKey {
+				slog.Warn("list: key regression, terminating", "page", pageNum, "firstKey", firstKey, "seenMaxKey", seenMaxKey)
 				last = true
 			}
-			if lastKey := aws.ToString(out.Contents[len(out.Contents)-1].Key); lastKey > seenMaxKey {
+			if lastKey > seenMaxKey {
 				seenMaxKey = lastKey
 			}
 			prevToken = nextToken
+
 			select {
 			case pages <- fetchedPage{objs: out.Contents, last: last}:
 			case <-ctx.Done():
@@ -83,6 +100,7 @@ func StreamingDiff(
 			}
 			token = out.NextContinuationToken
 			if last {
+				slog.Debug("list: done", "totalPages", pageNum, "firstKey", firstKey, "lastKey", lastKey)
 				return
 			}
 		}
@@ -111,8 +129,6 @@ func StreamingDiff(
 			case p, ok := <-pages:
 				if !ok {
 					listDone = true
-					// When pages closes, the fetcher may have sent an error.
-					// Prefer errCh over silent exhaustion.
 					select {
 					case err := <-errCh:
 						listErr = err
@@ -144,12 +160,12 @@ func StreamingDiff(
 	cacheHasMore := cacheCur.Next()
 	listObj, listHasMore := nextListObj()
 
+	var listCount, cacheCount, copyCount, deleteCount int
 	for listHasMore || cacheHasMore {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Check for async fetch error without blocking
 		select {
 		case err := <-errCh:
 			return err
@@ -157,20 +173,25 @@ func StreamingDiff(
 		}
 
 		if listHasMore && (!cacheHasMore || keyLt(aws.ToString(listObj.Key), cacheCur.Key())) {
+			copyCount++
 			actions <- SyncAction{
 				Type: ActionCopy, Key: aws.ToString(listObj.Key),
 				ETag: aws.ToString(listObj.ETag), Size: aws.ToInt64(listObj.Size),
 				LastModified: aws.ToTime(listObj.LastModified),
 			}
 			listObj, listHasMore = nextListObj()
+			listCount++
 		} else if cacheHasMore && (!listHasMore || keyLt(cacheCur.Key(), aws.ToString(listObj.Key))) {
 			if deletePropagation {
+				deleteCount++
 				actions <- SyncAction{Type: ActionDelete, Key: cacheCur.Key()}
 			}
 			cacheHasMore = cacheCur.Next()
+			cacheCount++
 		} else {
 			co := cacheCur.Object()
 			if co.ETag != aws.ToString(listObj.ETag) || !co.LastModified.Equal(aws.ToTime(listObj.LastModified)) {
+				copyCount++
 				actions <- SyncAction{
 					Type: ActionCopy, Key: aws.ToString(listObj.Key),
 					ETag: aws.ToString(listObj.ETag), Size: aws.ToInt64(listObj.Size),
@@ -178,11 +199,18 @@ func StreamingDiff(
 				}
 			}
 			listObj, listHasMore = nextListObj()
+			listCount++
 			cacheHasMore = cacheCur.Next()
+			cacheCount++
 		}
 	}
 
-	// Drain any async fetch error that wasn't caught during the loop
+	slog.Info("diff summary",
+		"listObjects", listCount,
+		"cacheObjects", cacheCount,
+		"copies", copyCount,
+		"deletes", deleteCount)
+
 	select {
 	case err := <-errCh:
 		return err

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,7 +96,7 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	src := fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)
+	src := wp.copySource(a.Key)
 	needCopy := true
 	// HeadObject on target — 404 means needs copy (not an error)
 	headErr := func() error {
@@ -152,6 +154,18 @@ func (wp *WorkerPool) deleteObject(ctx context.Context, a SyncAction) error {
 		})
 		return err
 	}, 3)
+}
+
+// copySource builds the x-amz-copy-source header value.
+// S3 requires each key segment to be URL-encoded separately,
+// but the bucket/key separator and slashes in the key path
+// must remain literal.
+func (wp *WorkerPool) copySource(key string) string {
+	segments := strings.Split(key, "/")
+	for i, s := range segments {
+		segments[i] = url.PathEscape(s)
+	}
+	return fmt.Sprintf("%s/%s", wp.sourceBucket, strings.Join(segments, "/"))
 }
 
 func retryS3(ctx context.Context, label string, fn func(context.Context) error, maxAttempts int) error {
