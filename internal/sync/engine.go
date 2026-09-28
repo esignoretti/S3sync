@@ -209,7 +209,11 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	// is re-diffed as a deletion on every later run, so the pair never converges
 	// and issues one DELETE per run forever. Only successful actions reach
 	// `succeeded`, so a failed delete stays cached and is retried next run.
-	if len(succeeded) > 0 {
+	//
+	// Dry runs are excluded entirely: their actions were never performed, so
+	// recording them would make the next real run treat the objects as already
+	// synced and silently skip the work the dry run was meant to preview.
+	if len(succeeded) > 0 && !e.pair.DryRun {
 		now := time.Now().UTC()
 		cached := make([]*cache.CachedObject, 0, len(succeeded))
 		deletedKeys := make([]string, 0, len(succeeded))
