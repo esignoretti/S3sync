@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 type WorkerPool struct {
@@ -98,27 +100,29 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 
 	src := wp.copySource(a.Key)
 	needCopy := true
-	// HeadObject on target — 404 means needs copy (not an error)
-	headErr := func() error {
-		if err := wp.throttler.WaitLog(reqCtx, wp.sourceBucket); err != nil {
+	// HeadObject on the target: a 404 means the object is absent and therefore
+	// MUST be copied, so it is a successful probe rather than a failure.
+	// Transient errors are retried — they say nothing about whether it exists.
+	headErr := retryS3(reqCtx, "HeadObject", func(c context.Context) error {
+		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
 			return err
 		}
-		headOut, err := wp.client.HeadObject(reqCtx, &s3.HeadObjectInput{
+		headOut, err := wp.client.HeadObject(c, &s3.HeadObjectInput{
 			Bucket: &wp.targetBucket, Key: &a.Key,
 		})
 		if err != nil {
+			if isNotFound(err) {
+				return nil // absent in target -> needs copy, not an error
+			}
 			return err
 		}
 		if aws.ToString(headOut.ETag) == a.ETag {
 			needCopy = false
 		}
 		return nil
-	}()
+	}, 3)
 	if headErr != nil {
-		var nf *types.NotFound
-		if !errors.As(headErr, &nf) {
-			return headErr
-		}
+		return headErr
 	}
 	if !needCopy {
 		slog.Debug("skip unchanged", "key", a.Key)
@@ -166,6 +170,22 @@ func (wp *WorkerPool) copySource(key string) string {
 		segments[i] = url.PathEscape(s)
 	}
 	return fmt.Sprintf("%s/%s", wp.sourceBucket, strings.Join(segments, "/"))
+}
+
+// isNotFound reports whether err is S3's "no such key" answer. The SDK maps a
+// HEAD 404 to *types.NotFound even though HEAD carries no error body, because
+// the shared error deserializer is configured with UseStatusCode. The raw
+// status-code check is a belt-and-braces fallback for any other error shape.
+func isNotFound(err error) bool {
+	var nf *types.NotFound
+	if errors.As(err, &nf) {
+		return true
+	}
+	var re *smithyhttp.ResponseError
+	if errors.As(err, &re) {
+		return re.HTTPStatusCode() == http.StatusNotFound
+	}
+	return false
 }
 
 func retryS3(ctx context.Context, label string, fn func(context.Context) error, maxAttempts int) error {
