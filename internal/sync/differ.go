@@ -27,8 +27,6 @@ type SyncAction struct {
 	LastModified time.Time
 }
 
-const maxS3Keys = 1000
-
 func StreamingDiff(
 	ctx context.Context,
 	listPage func(context.Context, *string) (*s3.ListObjectsV2Output, error),
@@ -77,7 +75,11 @@ func StreamingDiff(
 			firstKey := aws.ToString(out.Contents[0].Key)
 			lastKey := aws.ToString(out.Contents[len(out.Contents)-1].Key)
 
-			last := !isTruncated || nextToken == "" || len(out.Contents) < maxS3Keys
+			// Pagination stops on the API's own signals only. Page length is NOT a
+			// terminator: S3-compatible providers may return fewer than MaxKeys
+			// objects with IsTruncated=true and a continuation token, and treating
+			// a short page as the end silently drops every later page.
+			last := !isTruncated || nextToken == ""
 			if nextToken != "" && nextToken == prevToken {
 				slog.Warn("list: same token twice, terminating", "page", pageNum, "token", prevToken)
 				last = true
