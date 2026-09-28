@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/esignoretti/S3sync/internal/sync"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type apiResponse struct {

@@ -68,10 +68,10 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 				} else {
 					slog.Info("worker done", "key", a.Key, "action", a.Type, "ms", time.Since(start).Milliseconds())
 				}
-			results <- result{action: a, err: err}
-			if wp.progress != nil {
-				wp.progress.Add(err != nil)
-			}
+				results <- result{action: a, err: err}
+				if wp.progress != nil {
+					wp.progress.Add(err != nil)
+				}
 			}
 		}()
 	}

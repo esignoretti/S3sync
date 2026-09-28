@@ -8,12 +8,12 @@ import (
 	gosync "sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/esignoretti/S3sync/internal/cache"
 	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/esignoretti/S3sync/internal/s3client"
 	"github.com/esignoretti/S3sync/internal/sync"
+	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Server struct {

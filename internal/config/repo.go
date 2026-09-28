@@ -302,10 +302,10 @@ type rowScanner interface {
 
 func scanBucketFromRow(s rowScanner) (*Bucket, error) {
 	var (
-		b        Bucket
-		ol, ver  int
-		c, u     string
-		rm, rd   sql.NullString
+		b       Bucket
+		ol, ver int
+		c, u    string
+		rm, rd  sql.NullString
 	)
 	err := s.Scan(&b.ID, &b.Name, &b.Endpoint, &b.Region,
 		&b.AccessKey, &b.SecretKey, &b.BucketName,
@@ -342,12 +342,12 @@ func scanSyncPair(row *sql.Row) (*SyncPair, error) {
 
 func scanSyncPairFromRow(s rowScanner) (*SyncPair, error) {
 	var (
-		p           SyncPair
-		en, dp, dr  int
-		c, u        string
-		lsa         sql.NullString
-		ce          sql.NullInt64
-		tsc         sql.NullString
+		p          SyncPair
+		en, dp, dr int
+		c, u       string
+		lsa        sql.NullString
+		ce         sql.NullInt64
+		tsc        sql.NullString
 	)
 	err := s.Scan(&p.ID, &p.Name, &p.SourceBucketID, &p.TargetBucketID,
 		&p.SyncInterval, &p.WorkerCount, &p.MaxGetOpsPerMinute, &dp,
@@ -375,22 +375,30 @@ func scanSyncPairFromRow(s rowScanner) (*SyncPair, error) {
 // --- value helpers ---
 
 func boolInt(b bool) int {
-	if b { return 1 }
+	if b {
+		return 1
+	}
 	return 0
 }
 
 func nullStr(s string) *string {
-	if s == "" { return nil }
+	if s == "" {
+		return nil
+	}
 	return &s
 }
 
 func nullInt(n int) *int {
-	if n == 0 { return nil }
+	if n == 0 {
+		return nil
+	}
 	return &n
 }
 
 func nullTimeRFC(t *time.Time) *string {
-	if t == nil { return nil }
+	if t == nil {
+		return nil
+	}
 	s := t.Format(time.RFC3339)
 	return &s
 }

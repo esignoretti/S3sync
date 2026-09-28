@@ -203,5 +203,3 @@ func (c *CacheCursor) Key() string {
 func (c *CacheCursor) Object() CachedObject {
 	return c.obj
 }
-
-

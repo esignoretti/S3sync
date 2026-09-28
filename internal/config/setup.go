@@ -41,9 +41,9 @@ func NewSetupState() *SetupState {
 }
 
 type SetupInput struct {
-	Step        SetupStep `json:"step"`
-	Cancel      bool      `json:"cancel,omitempty"`
-	Back        bool      `json:"back,omitempty"`
+	Step   SetupStep `json:"step"`
+	Cancel bool      `json:"cancel,omitempty"`
+	Back   bool      `json:"back,omitempty"`
 
 	// Bucket fields
 	Name          string `json:"name,omitempty"`

@@ -47,12 +47,12 @@ type Engine struct {
 	throttler *Throttler
 	pool      *WorkerPool
 
-	mu         sync.Mutex
-	running    bool
-	lastRun    time.Time
-	lastStatus string
-	lastError  string
-	progress   *Progress
+	mu            sync.Mutex
+	running       bool
+	lastRun       time.Time
+	lastStatus    string
+	lastError     string
+	progress      *Progress
 	lastResult    *Progress
 	lastSucceeded int
 	lastFailed    int
