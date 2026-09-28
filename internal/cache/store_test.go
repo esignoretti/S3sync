@@ -73,3 +73,47 @@ func TestPutMany_Empty(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDeleteManyRemovesAllKeys(t *testing.T) {
+	db, err := bbolt.Open(t.TempDir()+"/test.db", 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Store{db: db}
+	if err := s.PutMany([]*CachedObject{
+		{PairID: "p1", Key: "a", ETag: "e1"},
+		{PairID: "p1", Key: "b", ETag: "e2"},
+		{PairID: "p1", Key: "c", ETag: "e3"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteMany("p1", []string{"a", "c"}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Key != "b" {
+		t.Fatalf("expected only b to remain, got %+v", list)
+	}
+}
+
+func TestDeleteManyEmptyIsNoOp(t *testing.T) {
+	db, err := bbolt.Open(t.TempDir()+"/test.db", 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Store{db: db}
+	if err := s.DeleteMany("absent", nil); err != nil {
+		t.Fatalf("nil keys: %v", err)
+	}
+	if err := s.DeleteMany("absent", []string{}); err != nil {
+		t.Fatalf("empty keys: %v", err)
+	}
+	if err := s.DeleteMany("absent", []string{"x"}); err != nil {
+		t.Fatalf("absent bucket: %v", err)
+	}
+}

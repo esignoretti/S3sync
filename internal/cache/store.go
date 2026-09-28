@@ -85,6 +85,28 @@ func (s *Store) Delete(pairID, key string) error {
 	})
 }
 
+// DeleteMany removes keys in a single transaction. Deletes must not be written
+// back as cached objects: a key deleted from the target that stays in the cache
+// is re-diffed as a deletion on every subsequent run, so the pair never
+// converges and issues one DELETE per run forever.
+func (s *Store) DeleteMany(pairID string, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(s.bucket(pairID))
+		if b == nil {
+			return nil
+		}
+		for _, k := range keys {
+			if err := b.Delete([]byte(k)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (s *Store) List(pairID string) ([]CachedObject, error) {
 	var out []CachedObject
 	err := s.db.View(func(tx *bbolt.Tx) error {

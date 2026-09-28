@@ -204,18 +204,35 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	// Cache succeeded actions regardless of diff error.
 	// Without this, a partial listing error discards all pool work and
 	// the next run starts from scratch — infinite cycle on large buckets.
+	//
+	// Copies are recorded; deletes are REMOVED. A deleted key left in the cache
+	// is re-diffed as a deletion on every later run, so the pair never converges
+	// and issues one DELETE per run forever. Only successful actions reach
+	// `succeeded`, so a failed delete stays cached and is retried next run.
 	if len(succeeded) > 0 {
 		now := time.Now().UTC()
 		cached := make([]*cache.CachedObject, 0, len(succeeded))
+		deletedKeys := make([]string, 0, len(succeeded))
 		for _, a := range succeeded {
+			if a.Type == ActionDelete {
+				deletedKeys = append(deletedKeys, a.Key)
+				continue
+			}
 			cached = append(cached, &cache.CachedObject{
 				PairID: e.pair.ID, Key: a.Key,
 				ETag: a.ETag, Size: a.Size,
 				LastModified: a.LastModified, SyncedAt: now,
 			})
 		}
-		if err := e.store.PutMany(cached); err != nil {
-			slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
+		if len(cached) > 0 {
+			if err := e.store.PutMany(cached); err != nil {
+				slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
+			}
+		}
+		if len(deletedKeys) > 0 {
+			if err := e.store.DeleteMany(e.pair.ID, deletedKeys); err != nil {
+				slog.Warn("cache delete failed", "pair", e.pair.Name, "error", err)
+			}
 		}
 	}
 
