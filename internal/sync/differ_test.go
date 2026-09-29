@@ -47,30 +47,131 @@ func TestStreamingDiffNew(t *testing.T) {
 	}
 }
 
+// newCacheCursor seeds a bbolt cache with the given objects and returns a cursor
+// over them, positioned at the first key. It goes through the same Store and
+// cursor API the engine uses, so these tests exercise the real comparison path
+// instead of a hand-rolled stub that could drift away from it.
+func newCacheCursor(t *testing.T, pairID string, objs ...cache.CachedObject) *cache.CacheCursor {
+	t.Helper()
+	store, err := cache.Open(t.TempDir() + "/cache.db")
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	for i := range objs {
+		o := objs[i]
+		o.PairID = pairID
+		if o.SyncedAt.IsZero() {
+			o.SyncedAt = time.Now()
+		}
+		if err := store.Put(&o); err != nil {
+			t.Fatalf("seed cache with %q: %v", o.Key, err)
+		}
+	}
+
+	cur, closeCursor, err := store.NewCursor(pairID)
+	if err != nil {
+		t.Fatalf("NewCursor: %v", err)
+	}
+	t.Cleanup(closeCursor)
+	return cur
+}
+
+// syncTime is a fixed, second-precision timestamp. It round-trips through the
+// cache's JSON encoding exactly, so an "unchanged" assertion cannot fail merely
+// because the stored time lost sub-second precision along the way.
+var syncTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// An object already in the cache with the same ETag and LastModified is up to
+// date, so the diff must emit NOTHING.
+//
+// The previous version of this test handed over an empty cursor and asserted one
+// copy: that is the new-object case (TestStreamingDiffNew) and it never reached
+// the unchanged-detection branch it is named after.
 func TestStreamingDiffUnchanged(t *testing.T) {
-	tm := time.Now()
-	listing := []s3types.Object{{Key: aws.String("a.jpg"), ETag: aws.String(`"1"`), LastModified: aws.Time(tm)}}
+	listing := []s3types.Object{{Key: aws.String("a.jpg"), ETag: aws.String(`"1"`), LastModified: aws.Time(syncTime)}}
+	cacheCur := newCacheCursor(t, "p1", cache.CachedObject{
+		Key: "a.jpg", ETag: `"1"`, LastModified: syncTime,
+	})
+
 	actions := make(chan SyncAction)
-	// No cache bucket → empty cursor
 	go func() {
-		StreamingDiff(context.Background(), listPageFrom(listing, nil), &cache.CacheCursor{}, false, actions)
+		StreamingDiff(context.Background(), listPageFrom(listing, nil), cacheCur, false, actions)
 	}()
 	result := collectActions(t, actions)
-	// No cache → all are new copies
-	if len(result) != 1 {
-		t.Fatalf("expected 1 copy, got %d", len(result))
+	if len(result) != 0 {
+		t.Fatalf("expected 0 actions for an unchanged object, got %d: %+v", len(result), result)
 	}
 }
 
-func TestStreamingDiffDelete(t *testing.T) {
-	listing := []s3types.Object{{Key: aws.String("a.jpg")}}
+// A changed ETag must produce a copy. This is the companion to the test above:
+// together they show the comparison is genuinely evaluated rather than skipped,
+// so "0 actions" cannot pass for the wrong reason.
+func TestStreamingDiffChangedETagTriggersCopy(t *testing.T) {
+	listing := []s3types.Object{{Key: aws.String("a.jpg"), ETag: aws.String(`"2"`), LastModified: aws.Time(syncTime)}}
+	cacheCur := newCacheCursor(t, "p1", cache.CachedObject{
+		Key: "a.jpg", ETag: `"1"`, LastModified: syncTime,
+	})
+
 	actions := make(chan SyncAction)
 	go func() {
-		StreamingDiff(context.Background(), listPageFrom(listing, nil), &cache.CacheCursor{}, true, actions)
+		StreamingDiff(context.Background(), listPageFrom(listing, nil), cacheCur, false, actions)
 	}()
 	result := collectActions(t, actions)
 	if len(result) != 1 {
-		t.Fatalf("expected 1 copy (a.jpg), got %d", len(result))
+		t.Fatalf("expected 1 copy for a changed ETag, got %d: %+v", len(result), result)
+	}
+	if result[0].Type != ActionCopy || result[0].Key != "a.jpg" {
+		t.Fatalf("expected a copy of a.jpg, got type %d of %q", result[0].Type, result[0].Key)
+	}
+}
+
+// A key present in the cache but absent from the listing was deleted at the
+// source. With delete propagation on it must yield exactly one ActionDelete
+// naming that key.
+//
+// The previous version of this test passed an empty cursor and asserted one
+// copy, so it never exercised delete propagation at all.
+func TestStreamingDiffDelete(t *testing.T) {
+	listing := []s3types.Object{{Key: aws.String("kept.jpg"), ETag: aws.String(`"1"`), LastModified: aws.Time(syncTime)}}
+	cacheCur := newCacheCursor(t, "p1",
+		cache.CachedObject{Key: "kept.jpg", ETag: `"1"`, LastModified: syncTime},
+		cache.CachedObject{Key: "gone.jpg", ETag: `"2"`, LastModified: syncTime},
+	)
+
+	actions := make(chan SyncAction)
+	go func() {
+		StreamingDiff(context.Background(), listPageFrom(listing, nil), cacheCur, true, actions)
+	}()
+	result := collectActions(t, actions)
+	if len(result) != 1 {
+		t.Fatalf("expected exactly 1 action, got %d: %+v", len(result), result)
+	}
+	if result[0].Type != ActionDelete {
+		t.Fatalf("expected a delete, got type %d", result[0].Type)
+	}
+	if result[0].Key != "gone.jpg" {
+		t.Fatalf("deleted key = %q, want %q", result[0].Key, "gone.jpg")
+	}
+}
+
+// The counterpart: with delete propagation off, the same stale cache entry must
+// produce no action, so the key is deliberately left alone at the target.
+func TestStreamingDiffDeletePropagationOffEmitsNothing(t *testing.T) {
+	listing := []s3types.Object{{Key: aws.String("kept.jpg"), ETag: aws.String(`"1"`), LastModified: aws.Time(syncTime)}}
+	cacheCur := newCacheCursor(t, "p1",
+		cache.CachedObject{Key: "kept.jpg", ETag: `"1"`, LastModified: syncTime},
+		cache.CachedObject{Key: "gone.jpg", ETag: `"2"`, LastModified: syncTime},
+	)
+
+	actions := make(chan SyncAction)
+	go func() {
+		StreamingDiff(context.Background(), listPageFrom(listing, nil), cacheCur, false, actions)
+	}()
+	result := collectActions(t, actions)
+	if len(result) != 0 {
+		t.Fatalf("expected 0 actions with delete propagation off, got %d: %+v", len(result), result)
 	}
 }
 
