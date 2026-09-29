@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -176,4 +177,113 @@ func TestDryRunDoesNotWriteCache(t *testing.T) {
 	if copyCalls != 1 {
 		t.Errorf("CopyObject calls after real run = %d, want 1 (dry run must not suppress the copy)", copyCalls)
 	}
+}
+
+// newCopyServer returns a test S3 endpoint where the source lists exactly one
+// object and the target does not have it, so a run performs exactly one copy
+// and completes normally.
+func newCopyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			if !objectPath(r.URL.Path) {
+				w.WriteHeader(http.StatusOK) // bucket exists
+				return
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, notFoundBody)
+		case http.MethodPut:
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, copyOKBody)
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, oneObjectListing("obj.bin", `"e1"`))
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Status must hand back plain data. Returning Progress by value copies its
+// sync.Mutex, which go vet flags and which means readers and writers can end up
+// observing different locks.
+func TestStatusReturnsSnapshotWithoutMutexCopy(t *testing.T) {
+	srv := newCopyServer(t)
+	store := newTestStore(t)
+	pair := &config.SyncPair{ID: "p1", Name: "t", WorkerCount: 1}
+	eng := newTestEngine(t, srv.URL, store, pair)
+
+	running, _, _, _, snap := eng.Status()
+
+	// Compile-time proof the fifth value is a mutex-free snapshot type.
+	var _ ProgressSnapshot = snap
+	if running {
+		t.Error("engine reports running before RunOnce was called")
+	}
+}
+
+// lastRun must be recorded as part of the same locked update as the status, so
+// a concurrent Status() reader can never observe one without the other.
+func TestSetResultRecordsLastRun(t *testing.T) {
+	srv := newCopyServer(t)
+	store := newTestStore(t)
+	pair := &config.SyncPair{ID: "p1", Name: "t", WorkerCount: 1}
+	eng := newTestEngine(t, srv.URL, store, pair)
+
+	before := time.Now().Add(-time.Second)
+	if err := eng.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	running, lastRun, status, _, _ := eng.Status()
+	if running {
+		t.Error("engine still reports running after RunOnce returned")
+	}
+	if lastRun.IsZero() {
+		t.Fatal("lastRun is zero after a completed run")
+	}
+	if lastRun.Before(before) {
+		t.Errorf("lastRun = %v, want at or after %v", lastRun, before)
+	}
+	if status != "ok" {
+		t.Errorf("status = %q, want %q", status, "ok")
+	}
+}
+
+// Exercises the lastRun write against concurrent Status() readers under -race.
+// The defect is structural and go vet catches it deterministically; this is a
+// best-effort runtime check on the same path.
+func TestStatusConcurrentWithRunOnce(t *testing.T) {
+	srv := newCopyServer(t)
+	store := newTestStore(t)
+	pair := &config.SyncPair{ID: "p1", Name: "t", WorkerCount: 1}
+	eng := newTestEngine(t, srv.URL, store, pair)
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					eng.Status()
+				}
+			}
+		}()
+	}
+
+	if err := eng.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	close(done)
+	wg.Wait()
 }

@@ -19,6 +19,16 @@ type Progress struct {
 	Failed    int `json:"failed"`
 }
 
+// ProgressSnapshot is a plain-data copy of a Progress. Progress embeds a
+// sync.Mutex, so returning it by value copies the lock — go vet flags that, and
+// a copied lock means readers and writers can observe different mutexes. Handing
+// back a snapshot keeps the mutex private to the engine.
+type ProgressSnapshot struct {
+	Total     int `json:"total"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+}
+
 func (p *Progress) Add(err bool) {
 	p.mu.Lock()
 	p.Completed++
@@ -53,7 +63,7 @@ type Engine struct {
 	lastStatus    string
 	lastError     string
 	progress      *Progress
-	lastResult    *Progress
+	lastResult    *ProgressSnapshot
 	lastSucceeded int
 	lastFailed    int
 	lastCopied    int64
@@ -94,7 +104,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 
 	e.mu.Lock()
 	if e.progress.Total > 0 || e.progress.Completed > 0 {
-		e.lastResult = &Progress{Total: e.progress.Total, Completed: e.progress.Completed, Failed: e.progress.Failed}
+		e.lastResult = &ProgressSnapshot{Total: e.progress.Total, Completed: e.progress.Completed, Failed: e.progress.Failed}
 	}
 	e.progress.Total = 0
 	e.progress.Completed = 0
@@ -134,7 +144,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 
 	cacheCur, closeCur, err := e.store.NewCursor(e.pair.ID)
 	if err != nil {
-		e.setResult("error", fmt.Sprintf("cache cursor: %v", err))
+		e.setResult("error", fmt.Sprintf("cache cursor: %v", err), time.Now())
 		return fmt.Errorf("cache cursor: %w", err)
 	}
 
@@ -241,7 +251,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}
 
 	if diffErr != nil {
-		e.setResult("error", fmt.Sprintf("diff: %v", diffErr))
+		e.setResult("error", fmt.Sprintf("diff: %v", diffErr), time.Now())
 		return fmt.Errorf("diff: %w", diffErr)
 	}
 
@@ -281,8 +291,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		status = "error"
 		lastErr = fmt.Sprintf("%d worker(s) failed", failed)
 	}
-	e.setResult(status, lastErr)
-	e.lastRun = time.Now()
+	e.setResult(status, lastErr, time.Now())
 
 	if e.pair.WebhookURL != "" {
 		completedAt := time.Now().UTC().Format(time.RFC3339)
@@ -308,10 +317,14 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-func (e *Engine) setResult(status, errMsg string) {
+// setResult records the terminal status, error and completion time in a single
+// locked update, so a concurrent Status() reader can never observe a status
+// without its matching lastRun.
+func (e *Engine) setResult(status, errMsg string, lastRun time.Time) {
 	e.mu.Lock()
 	e.lastStatus = status
 	e.lastError = errMsg
+	e.lastRun = lastRun
 	e.mu.Unlock()
 }
 
@@ -326,20 +339,19 @@ func (e *Engine) Stop() {
 	e.mu.Unlock()
 }
 
-func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastError string, progress Progress) {
+func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastError string, progress ProgressSnapshot) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	p := Progress{}
 	total, completed, failed := e.progress.Snapshot()
-	p.Total = total
-	p.Completed = completed
-	p.Failed = failed
-	if !e.running && p.Total == 0 && p.Completed == 0 && e.lastResult != nil {
-		p.Total = e.lastResult.Total
-		p.Completed = e.lastResult.Completed
-		p.Failed = e.lastResult.Failed
+	progress.Total = total
+	progress.Completed = completed
+	progress.Failed = failed
+	if !e.running && progress.Total == 0 && progress.Completed == 0 && e.lastResult != nil {
+		progress.Total = e.lastResult.Total
+		progress.Completed = e.lastResult.Completed
+		progress.Failed = e.lastResult.Failed
 	}
-	return e.running, e.lastRun, e.lastStatus, e.lastError, p
+	return e.running, e.lastRun, e.lastStatus, e.lastError, progress
 }
 
 func (e *Engine) LastResult() (succeeded, failed int) {

@@ -148,15 +148,15 @@ func (s *Server) createSyncPair(c *gin.Context) {
 
 type syncPairResponse struct {
 	config.SyncPair
-	SourceBucket string         `json:"source_bucket"`
-	TargetBucket string         `json:"target_bucket"`
-	SourceName   string         `json:"source_name"`
-	TargetName   string         `json:"target_name"`
-	SourceURL    string         `json:"source_url"`
-	TargetURL    string         `json:"target_url"`
-	Progress     *sync.Progress `json:"progress"`
-	Running      bool           `json:"running"`
-	LastError    string         `json:"last_error"`
+	SourceBucket string                 `json:"source_bucket"`
+	TargetBucket string                 `json:"target_bucket"`
+	SourceName   string                 `json:"source_name"`
+	TargetName   string                 `json:"target_name"`
+	SourceURL    string                 `json:"source_url"`
+	TargetURL    string                 `json:"target_url"`
+	Progress     *sync.ProgressSnapshot `json:"progress"`
+	Running      bool                   `json:"running"`
+	LastError    string                 `json:"last_error"`
 }
 
 func enrichPair(repo *config.Repository, p config.SyncPair) syncPairResponse {
