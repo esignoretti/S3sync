@@ -154,7 +154,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	listPage := func(ctx context.Context, token *string) (*s3.ListObjectsV2Output, error) {
 		reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		if err := e.throttler.WaitLog(reqCtx, e.src.BucketName); err != nil {
+		if err := e.throttler.WaitFor(reqCtx, e.src.BucketName); err != nil {
 			return nil, err
 		}
 		return e.srcS3.ListObjectsV2(reqCtx, &s3.ListObjectsV2Input{

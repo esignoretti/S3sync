@@ -24,18 +24,27 @@ func NewThrottler(maxOpsPerMinute int) *Throttler {
 	}
 }
 
-func (t *Throttler) WaitLog(ctx context.Context, label string) error {
+// WaitFor blocks until the limiter admits one operation for the given bucket.
+// The label is the bucket the operation actually targets — the worker pool does
+// its HeadObject/CopyObject/DeleteObject against the TARGET bucket, so passing
+// the source bucket there made the throttle logs claim the wrong bucket.
+func (t *Throttler) WaitFor(ctx context.Context, bucket string) error {
 	if !t.enabled {
 		return nil
 	}
 	if t.limiter.Allow() {
 		return nil
 	}
-	slog.Debug("throttle wait", "label", label)
+	slog.Debug("throttle wait", "bucket", bucket)
 	start := time.Now()
 	err := t.limiter.Wait(ctx)
 	if err == nil {
-		slog.Debug("throttle done", "label", label, "waited_ms", time.Since(start).Milliseconds())
+		slog.Debug("throttle done", "bucket", bucket, "waited_ms", time.Since(start).Milliseconds())
 	}
 	return err
+}
+
+// WaitLog is retained for existing callers and delegates to WaitFor.
+func (t *Throttler) WaitLog(ctx context.Context, label string) error {
+	return t.WaitFor(ctx, label)
 }

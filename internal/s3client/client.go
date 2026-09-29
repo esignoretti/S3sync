@@ -21,6 +21,14 @@ func NewClient(b *bucketc.Bucket) (*s3.Client, error) {
 		config.WithHTTPClient(&http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
+				// Go's default of 2 idle connections per host forces a fresh
+				// TCP+TLS handshake for every operation beyond the second, while
+				// worker_count defaults to 10 and the README suggests 20. Size the
+				// pool for the concurrency the tool advertises.
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   100,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
 				ResponseHeaderTimeout: 10 * time.Second,
 				ExpectContinueTimeout: 5 * time.Second,
 			},

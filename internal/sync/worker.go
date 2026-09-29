@@ -104,7 +104,7 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 	// MUST be copied, so it is a successful probe rather than a failure.
 	// Transient errors are retried — they say nothing about whether it exists.
 	headErr := retryS3(reqCtx, "HeadObject", func(c context.Context) error {
-		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+		if err := wp.throttler.WaitFor(c, wp.targetBucket); err != nil {
 			return err
 		}
 		headOut, err := wp.client.HeadObject(c, &s3.HeadObjectInput{
@@ -130,7 +130,7 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 	}
 
 	return retryS3(reqCtx, "CopyObject", func(c context.Context) error {
-		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+		if err := wp.throttler.WaitFor(c, wp.targetBucket); err != nil {
 			return err
 		}
 		output := &s3.CopyObjectInput{
@@ -150,7 +150,7 @@ func (wp *WorkerPool) deleteObject(ctx context.Context, a SyncAction) error {
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	return retryS3(reqCtx, "DeleteObject", func(c context.Context) error {
-		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+		if err := wp.throttler.WaitFor(c, wp.targetBucket); err != nil {
 			return err
 		}
 		_, err := wp.client.DeleteObject(c, &s3.DeleteObjectInput{
