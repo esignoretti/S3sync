@@ -123,6 +123,20 @@ Global Flags:
 - **Background sync** — runs sync cycle per enabled pair on its configured interval
 - **Web UI** — dark-themed dashboard with live polling (Cubbit-inspired design)
 
+The server listens on **all interfaces** (`0.0.0.0`) on port `8080` by default — change it with `--port`.
+
+### Authentication
+
+Authentication is controlled entirely by `S3SYNC_API_KEY`:
+
+- **Unset (default):** the server is **open**. Every endpoint is reachable by anyone who can reach the port, including `POST /api/buckets` (which stores S3 credentials) and `GET /api/export`. On a shared or public network, set the key or bind to a trusted interface.
+- **Set:** requests need either a session cookie or an `Authorization: Bearer <key>` header. Browser access goes through the login page at `/login`; the session cookie is `HttpOnly` and `SameSite=Lax`. `/api/health` stays reachable without credentials so container healthchecks keep working.
+
+```bash
+export S3SYNC_API_KEY="$(openssl rand -hex 32)"
+s3sync serve
+```
+
 ### Web Dashboard
 
 Cards show per-pair:
@@ -232,9 +246,19 @@ If cache is missing or corrupted, `copyObject` does a HEAD on the target — if 
 
 **Throttling:** Each sync pair sets `max_get_ops_per_minute`. Token bucket limits GET/HEAD ops on source. 0 = unlimited.
 
+**Defaults:** Endpoint `https://s3.cubbit.eu`, region `eu-west-1` (Cubbit DS3).
+
+**Object size limit:** S3's `CopyObject` handles at most 5 GiB in a single call. Larger objects fail fast with an error naming the limit; multipart copy is not implemented. Such an object is reported as a failure for that run and is retried on the next one, so the pair does not converge until it is removed or multipart copy lands.
+
 **Cache lock:** The BoltDB sync cache takes an exclusive 5-second lock, so `s3sync pair sync` fails while `s3sync serve` is running against the same config directory — the server already owns the cache.
 
-**Defaults:** Endpoint `https://s3.cubbit.eu`, region `eu-west-1` (Cubbit DS3).
+### Environment variables
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `BUCKETSYNC_MASTER_KEY` | unset | Encrypts stored S3 credentials with AES-256-GCM. **Unset means credentials are written to the config database in plaintext**, and the server logs a warning at startup. Use the same key for the lifetime of the database: changing it makes existing credentials undecryptable, and reads now fail loudly instead of returning ciphertext as a credential. Required by `docker-compose.yml`. |
+| `S3SYNC_API_KEY` | unset | Enables authentication for the API, the web UI and `/metrics`. **Unset means the server is fully unauthenticated** — see Serve Mode below. |
+| `S3_TEST_ENDPOINT`, `S3_TEST_ACCESS_KEY`, `S3_TEST_SECRET_KEY` | unset | Used only by the integration tests. |
 
 ## Development
 
