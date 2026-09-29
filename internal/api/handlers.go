@@ -39,18 +39,43 @@ type bucketInput struct {
 	RetentionDays int    `json:"retention_days,omitempty"`
 }
 
+// newBucketFromInput builds a fresh bucket from a create request.
+func newBucketFromInput(in bucketInput) *config.Bucket {
+	b := &config.Bucket{}
+	applyBucketInput(b, in)
+	return b
+}
+
+// applyBucketInput maps request fields onto a bucket, shared by create and
+// update so the two cannot drift apart.
+//
+// Credentials are copied only when supplied. On update an omitted secret means
+// "leave it alone": assigning an empty string would re-encrypt nothing and
+// silently destroy working credentials that every referencing sync pair needs.
+func applyBucketInput(b *config.Bucket, in bucketInput) {
+	b.Name = in.Name
+	b.Endpoint = in.Endpoint
+	b.Region = in.Region
+	b.BucketName = in.BucketName
+	b.ObjectLock = in.ObjectLock
+	b.Versioning = in.Versioning
+	b.RetentionMode = in.RetentionMode
+	b.RetentionDays = in.RetentionDays
+	if in.AccessKey != "" {
+		b.AccessKey = in.AccessKey
+	}
+	if in.SecretKey != "" {
+		b.SecretKey = in.SecretKey
+	}
+}
+
 func (s *Server) createBucket(c *gin.Context) {
 	var in bucketInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	b := &config.Bucket{
-		Name: in.Name, Endpoint: in.Endpoint, Region: in.Region,
-		AccessKey: in.AccessKey, SecretKey: in.SecretKey,
-		BucketName: in.BucketName, ObjectLock: in.ObjectLock, Versioning: in.Versioning,
-		RetentionMode: in.RetentionMode, RetentionDays: in.RetentionDays,
-	}
+	b := newBucketFromInput(in)
 	if err := s.repo.CreateBucket(b); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
@@ -90,20 +115,7 @@ func (s *Server) updateBucket(c *gin.Context) {
 		respondError(c, http.StatusNotFound, err.Error())
 		return
 	}
-	existing.Name = in.Name
-	existing.Endpoint = in.Endpoint
-	existing.Region = in.Region
-	existing.BucketName = in.BucketName
-	existing.ObjectLock = in.ObjectLock
-	existing.Versioning = in.Versioning
-	existing.RetentionMode = in.RetentionMode
-	existing.RetentionDays = in.RetentionDays
-	if in.AccessKey != "" {
-		existing.AccessKey = in.AccessKey
-	}
-	if in.SecretKey != "" {
-		existing.SecretKey = in.SecretKey
-	}
+	applyBucketInput(existing, in)
 	if err := s.repo.UpdateBucket(existing); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
