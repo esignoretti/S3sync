@@ -293,6 +293,15 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}
 	e.setResult(status, lastErr, time.Now())
 
+	// The stored pair's counter is advanced by the caller AFTER RunOnce returns
+	// (RunOneShot/StartEngineLoop), so e.pair.ConsecutiveErrors still holds the
+	// pre-run value here. Compute the post-run count so the webhook describes the
+	// run it is reporting instead of lagging one failure behind.
+	consecutiveErrors := 0
+	if status == "error" {
+		consecutiveErrors = e.pair.ConsecutiveErrors + 1
+	}
+
 	if e.pair.WebhookURL != "" {
 		completedAt := time.Now().UTC().Format(time.RFC3339)
 		go func() {
@@ -301,7 +310,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 				PairID:            e.pair.ID,
 				PairName:          e.pair.Name,
 				Status:            status,
-				ConsecutiveErrors: e.pair.ConsecutiveErrors,
+				ConsecutiveErrors: consecutiveErrors,
 				LastError:         lastErr,
 				Succeeded:         succeededCount,
 				Failed:            failed,

@@ -15,20 +15,22 @@ type Config struct {
 	File   string
 }
 
-var closeOnce sync.Once
-var fileWriter io.WriteCloser
-
+// Init installs a default slog logger and returns a closer for the file this
+// call opened. The handle is captured per call rather than in package state: a
+// shared variable meant the first closer closed whichever file was opened last,
+// leaking the first handle and killing the second logger's writer.
 func Init(cfg Config) func() {
 	lvl := parseLevel(cfg.Level)
 	var w io.Writer = os.Stdout
 
+	var file io.Closer
 	if cfg.File != "" {
 		dir := filepath.Dir(cfg.File)
 		os.MkdirAll(dir, 0755)
 		f, err := os.OpenFile(cfg.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err == nil {
 			w = io.MultiWriter(os.Stdout, f)
-			fileWriter = f
+			file = f
 		}
 	}
 
@@ -49,10 +51,11 @@ func Init(cfg Config) func() {
 	}
 
 	slog.SetDefault(slog.New(h))
+	var once sync.Once
 	return func() {
-		closeOnce.Do(func() {
-			if fileWriter != nil {
-				fileWriter.Close()
+		once.Do(func() {
+			if file != nil {
+				file.Close()
 			}
 		})
 	}

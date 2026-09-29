@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -47,6 +48,17 @@ func SendWebhook(url, events string, p WebhookPayload) {
 		slog.Warn("webhook: delivery failed", "url", trunc(url, 60), "error", err)
 		return
 	}
+	// Drain to EOF before closing so net/http can return the connection to the
+	// idle pool. Closing with unread data forces the transport to drop the
+	// connection, so every webhook paid a fresh TCP+TLS handshake and the
+	// receiver's response was written to a socket nobody read.
+	//
+	// This must read the WHOLE body, not a bounded prefix: a LimitReader that
+	// stops at a byte count leaves the chunked terminator unread, so the body is
+	// not at EOF and the connection is dropped anyway — the cap defeats the
+	// reuse it was meant to protect. The 10s request context above is what
+	// bounds this read; io.Discard allocates nothing.
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	slog.Debug("webhook delivered", "url", trunc(url, 60), "status", resp.StatusCode)
 }
