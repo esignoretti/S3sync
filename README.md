@@ -262,11 +262,15 @@ If cache is missing or corrupted, `copyObject` does a HEAD on the target — if 
 
 ## Development
 
+Reproduce exactly what CI runs (`.github/workflows/ci.yml`) with:
+
 ```bash
-go test ./...
-go vet ./...
-go build -o s3sync .
+go build ./... && go vet ./... && gofmt -l internal/ cmd/ tests/ main.go && go test -race ./...
 ```
+
+The race detector is part of the gate, not optional: the sync engine runs a
+worker pool, a progress reporter and the diff concurrently, and `-race` is what
+catches a regression there. `gofmt -l` prints nothing when the tree is clean.
 
 Integration tests require a compatible S3 endpoint:
 

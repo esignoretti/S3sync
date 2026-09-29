@@ -34,6 +34,9 @@ func (s *Store) ensureBucket(pairID string, tx *bbolt.Tx) (*bbolt.Bucket, error)
 	return tx.CreateBucketIfNotExists(s.bucket(pairID))
 }
 
+// Put stores one object. Production writes go through PutMany so a run's
+// results land in a single transaction; this single-object form is kept for
+// tests (store_test.go, differ_test.go).
 func (s *Store) Put(obj *CachedObject) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b, err := s.ensureBucket(obj.PairID, tx)
@@ -76,6 +79,8 @@ func (s *Store) PutMany(objs []*CachedObject) error {
 	})
 }
 
+// Delete removes one key. Production deletions go through DeleteMany for the
+// same single-transaction reason; this form is kept for tests.
 func (s *Store) Delete(pairID, key string) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(s.bucket(pairID))

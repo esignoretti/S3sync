@@ -174,7 +174,7 @@ func StreamingDiff(
 		default:
 		}
 
-		if listHasMore && (!cacheHasMore || keyLt(aws.ToString(listObj.Key), cacheCur.Key())) {
+		if listHasMore && (!cacheHasMore || aws.ToString(listObj.Key) < cacheCur.Key()) {
 			copyCount++
 			actions <- SyncAction{
 				Type: ActionCopy, Key: aws.ToString(listObj.Key),
@@ -183,7 +183,7 @@ func StreamingDiff(
 			}
 			listObj, listHasMore = nextListObj()
 			listCount++
-		} else if cacheHasMore && (!listHasMore || keyLt(cacheCur.Key(), aws.ToString(listObj.Key))) {
+		} else if cacheHasMore && (!listHasMore || cacheCur.Key() < aws.ToString(listObj.Key)) {
 			if deletePropagation {
 				deleteCount++
 				actions <- SyncAction{Type: ActionDelete, Key: cacheCur.Key()}
@@ -219,8 +219,4 @@ func StreamingDiff(
 	default:
 	}
 	return listErr
-}
-
-func keyLt(a, b string) bool {
-	return a < b
 }
