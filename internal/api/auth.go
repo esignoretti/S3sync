@@ -62,11 +62,16 @@ func (s *Server) loginHandler(c *gin.Context) {
 	sessions[sessionToken] = time.Now().Add(24 * time.Hour)
 	sessionsMu.Unlock()
 	secure := c.Request.TLS != nil
+	// Lax keeps the session cookie off cross-site requests, which is the CSRF
+	// exposure HttpOnly does not cover. gin resets sameSite per request, so
+	// setting it here cannot leak into other handlers.
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("s3sync_token", sessionToken, 86400, "/", "", secure, true)
 	c.Redirect(http.StatusFound, "/")
 }
 
 func (s *Server) logoutHandler(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("s3sync_token", "", -1, "/", "", false, true)
 	if authEnabled {
 		c.Redirect(http.StatusFound, "/login")
@@ -110,6 +115,7 @@ func authRequired(c *gin.Context) {
 	exp, ok := sessions[token]
 	sessionsMu.RUnlock()
 	if !ok || time.Now().After(exp) {
+		c.SetSameSite(http.SameSiteLaxMode)
 		c.SetCookie("s3sync_token", "", -1, "/", "", false, true)
 		unauthorized(c, path)
 		return

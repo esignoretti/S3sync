@@ -32,6 +32,7 @@ var serveCmd = &cobra.Command{
 			return fmt.Errorf("create server: %w", err)
 		}
 		defer srv.Close()
+		srv.SetVersion(buildVersion)
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -57,9 +58,17 @@ var serveCmd = &cobra.Command{
 
 		slog.Info("server starting", "port", port)
 		httpSrv := &http.Server{
-			Addr:        fmt.Sprintf(":%d", port),
-			Handler:     srv.Router(),
-			IdleTimeout: 5 * time.Second,
+			Addr:    fmt.Sprintf(":%d", port),
+			Handler: srv.Router(),
+			// ReadHeaderTimeout bounds a slow-loris client that dribbles
+			// headers; ReadTimeout bounds a slow request body. WriteTimeout
+			// is deliberately generous because the sync and setup handlers
+			// do real S3 work before responding, and a short write deadline
+			// would cut off a response that is merely slow, not stuck.
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       60 * time.Second,
+			WriteTimeout:      120 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		}
 
 		go func() {

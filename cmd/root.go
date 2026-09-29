@@ -24,7 +24,14 @@ var rootCmd = &cobra.Command{
 	},
 }
 
-func Execute() {
+// buildVersion is the version reported by /api/version, passed in from main
+// (which receives it via -ldflags).
+var buildVersion = "dev"
+
+func Execute(version string) {
+	if version != "" {
+		buildVersion = version
+	}
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

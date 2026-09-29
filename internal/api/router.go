@@ -22,9 +22,14 @@ type Server struct {
 	setupStates map[string]*config.SetupState
 	engines     map[string]*sync.Engine
 	rootCtx     context.Context
+	buildVer    string
 	engineMu    gosync.RWMutex
 	setupMu     gosync.RWMutex
 }
+
+// defaultVersion is reported when no build version was injected with
+// -ldflags "-X main.version=...".
+const defaultVersion = "dev"
 
 func NewServer(repo *config.Repository, cachePath string) (*Server, error) {
 	c, err := cache.Open(cachePath)
@@ -36,6 +41,7 @@ func NewServer(repo *config.Repository, cachePath string) (*Server, error) {
 		cache:       c,
 		setupStates: make(map[string]*config.SetupState),
 		engines:     make(map[string]*sync.Engine),
+		buildVer:    defaultVersion,
 	}, nil
 }
 
@@ -80,13 +86,6 @@ func (s *Server) GetSetupState(sessionID string) (*config.SetupState, bool) {
 	return st, ok
 }
 
-func (s *Server) SetSetupState(sessionID string, st *config.SetupState) {
-	s.setupMu.Lock()
-	defer s.setupMu.Unlock()
-	s.setupStates[sessionID] = st
-}
-
-// GetOrCreateSetupState returns the existing state for a session or creates a new one.
 func (s *Server) GetOrCreateSetupState(sessionID string) *config.SetupState {
 	s.setupMu.Lock()
 	defer s.setupMu.Unlock()
@@ -235,6 +234,21 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 	return nil
 }
 
+// SetVersion records the build version reported by /api/version. It is called
+// once at startup, before the router is served.
+func (s *Server) SetVersion(v string) {
+	s.buildVer = v
+}
+
+// Version returns the build version, falling back to the default when none was
+// injected.
+func (s *Server) Version() string {
+	if s.buildVer == "" {
+		return defaultVersion
+	}
+	return s.buildVer
+}
+
 func (s *Server) recoverCrashedPairs() {
 	pairs, err := s.repo.ListSyncPairs()
 	if err != nil {
@@ -248,7 +262,10 @@ func (s *Server) recoverCrashedPairs() {
 		if p.LastSyncStatus == "" && p.ConsecutiveErrors > 0 {
 			slog.Info("recover: resetting stale pair", "pair", p.Name)
 			p.ConsecutiveErrors = 0
-			p.LastSyncStatus = "ok"
+			// The pair was mid-run when the process died, so no run ever
+			// completed. Recording "ok" would claim a success that never
+			// happened and hide the crash from the dashboard.
+			p.LastSyncStatus = "interrupted"
 			if err := s.repo.UpdateSyncPair(&p); err != nil {
 				slog.Warn("recover: update pair", "pair", p.Name, "error", err)
 			}

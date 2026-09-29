@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o s3sync . \
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION:-dev}" -o s3sync . \
  && mkdir -p /out/home/.s3sync
 
 # distroless static ships CA certificates and tzdata, which the scratch image
