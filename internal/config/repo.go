@@ -69,7 +69,9 @@ func (r *Repository) ListBuckets() ([]Bucket, error) {
 		return nil, err
 	}
 	for i := range out {
-		decryptCreds(r.key, &out[i])
+		if err := decryptCreds(r.key, &out[i]); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -80,7 +82,9 @@ func (r *Repository) GetBucket(id string) (*Bucket, error) {
 	if err != nil {
 		return nil, err
 	}
-	decryptCreds(r.key, b)
+	if err := decryptCreds(r.key, b); err != nil {
+		return nil, err
+	}
 	return b, nil
 }
 
@@ -90,7 +94,9 @@ func (r *Repository) GetBucketByName(name string) (*Bucket, error) {
 	if err != nil {
 		return nil, err
 	}
-	decryptCreds(r.key, b)
+	if err := decryptCreds(r.key, b); err != nil {
+		return nil, err
+	}
 	return b, nil
 }
 
@@ -407,22 +413,28 @@ func rfc(t time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
-func decryptCreds(key []byte, b *Bucket) {
+// decryptCreds replaces the stored (encrypted) credentials on b with their
+// plaintext. A failure means the master key changed since the credential was
+// saved, and returning the ciphertext as if it were a credential only defers the
+// failure to an S3 auth error far from the cause — so it is reported here.
+// key == nil is the legitimate plaintext-storage path and returns nil.
+func decryptCreds(key []byte, b *Bucket) error {
 	if key == nil {
-		return
+		return nil
 	}
 	if b.AccessKey != "" {
-		if d, err := Decrypt(b.AccessKey, key); err == nil {
-			b.AccessKey = string(d)
-		} else {
-			slog.Warn("decrypt access key failed", "bucket", b.Name, "error", err)
+		d, err := Decrypt(b.AccessKey, key)
+		if err != nil {
+			return fmt.Errorf("decrypt access key for bucket %q: %w (is %s the same one used to store it?)", b.Name, err, MasterKeyEnv)
 		}
+		b.AccessKey = string(d)
 	}
 	if b.SecretKey != "" {
-		if d, err := Decrypt(b.SecretKey, key); err == nil {
-			b.SecretKey = string(d)
-		} else {
-			slog.Warn("decrypt secret key failed", "bucket", b.Name, "error", err)
+		d, err := Decrypt(b.SecretKey, key)
+		if err != nil {
+			return fmt.Errorf("decrypt secret key for bucket %q: %w (is %s the same one used to store it?)", b.Name, err, MasterKeyEnv)
 		}
+		b.SecretKey = string(d)
 	}
+	return nil
 }
