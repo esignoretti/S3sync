@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,6 +219,88 @@ func TestCopyObjectHeadTransientErrorIsRetried(t *testing.T) {
 	}
 	if headCalls != 3 {
 		t.Errorf("HeadObject calls = %d, want 3 (two 503s then success)", headCalls)
+	}
+	if copyCalls != 1 {
+		t.Errorf("CopyObject calls = %d, want 1", copyCalls)
+	}
+}
+
+// S3's CopyObject cannot copy an object larger than 5 GiB — it answers with
+// EntityTooLarge, which retryS3 would burn all its attempts on even though the
+// operation can never succeed. Detect the oversize case up front and say so.
+func TestCopyObjectRejectsOversizeObject(t *testing.T) {
+	const sixGiB = 6 * 1024 * 1024 * 1024
+
+	var headCalls, copyCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			headCalls++
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			copyCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, copyOKBody)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	pool := newTestPool(t, srv.URL)
+	err := pool.copyObject(context.Background(), SyncAction{
+		Type: ActionCopy, Key: "huge.bin", ETag: `"abc123"`,
+		Size: sixGiB, LastModified: time.Now(),
+	})
+
+	if err == nil {
+		t.Fatal("copyObject accepted a 6 GiB object, want an error naming the 5 GiB limit")
+	}
+	if !strings.Contains(err.Error(), "huge.bin") {
+		t.Errorf("error %q does not name the offending key", err)
+	}
+	if !strings.Contains(err.Error(), "multipart") {
+		t.Errorf("error %q does not mention that multipart copy is unimplemented", err)
+	}
+	if copyCalls != 0 {
+		t.Errorf("CopyObject calls = %d, want 0 (the copy can never succeed)", copyCalls)
+	}
+	if headCalls != 0 {
+		t.Errorf("HeadObject calls = %d, want 0 (reject before any round trip)", headCalls)
+	}
+}
+
+// The limit is inclusive: exactly 5 GiB is still a legal single CopyObject.
+// Pinning the boundary keeps an off-by-one from silently refusing copies that
+// S3 would have accepted.
+func TestCopyObjectAllowsExactlyFiveGiB(t *testing.T) {
+	const fiveGiB = 5 * 1024 * 1024 * 1024
+
+	var copyCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			copyCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, copyOKBody)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	pool := newTestPool(t, srv.URL)
+	err := pool.copyObject(context.Background(), SyncAction{
+		Type: ActionCopy, Key: "big-but-legal.bin", ETag: `"abc123"`,
+		Size: fiveGiB, LastModified: time.Now(),
+	})
+
+	if err != nil {
+		t.Fatalf("copyObject rejected an exactly-5-GiB object: %v", err)
 	}
 	if copyCalls != 1 {
 		t.Errorf("CopyObject calls = %d, want 1", copyCalls)

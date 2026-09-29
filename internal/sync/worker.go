@@ -27,6 +27,11 @@ type WorkerPool struct {
 	progress     *Progress
 }
 
+// maxSingleCopySize is the largest object S3's CopyObject can copy in one call.
+// Larger objects need a multipart upload, which is not implemented, so they are
+// rejected up front instead of failing as an opaque EntityTooLarge.
+const maxSingleCopySize = 5 * 1024 * 1024 * 1024
+
 func NewWorkerPool(workers int, client *s3.Client, source, target string,
 	throttler *Throttler, storageClass string, progress *Progress) *WorkerPool {
 	return &WorkerPool{
@@ -95,6 +100,14 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 }
 
 func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
+	// S3 rejects CopyObject above 5 GiB with EntityTooLarge, which retryS3 would
+	// retry to exhaustion for an operation that can never succeed. Fail fast and
+	// name the real reason. Checked before any round trip so no request is wasted.
+	if a.Size > maxSingleCopySize {
+		return fmt.Errorf("object %q is %d bytes; exceeds the %d-byte single-copy limit (multipart copy not implemented)",
+			a.Key, a.Size, int64(maxSingleCopySize))
+	}
+
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
