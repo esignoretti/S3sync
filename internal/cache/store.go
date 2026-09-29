@@ -2,6 +2,7 @@ package cache
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -107,29 +108,20 @@ func (s *Store) DeleteMany(pairID string, keys []string) error {
 	})
 }
 
-func (s *Store) List(pairID string) ([]CachedObject, error) {
-	var out []CachedObject
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(s.bucket(pairID))
-		if b == nil {
-			return nil
-		}
-		return b.ForEach(func(_, v []byte) error {
-			var o CachedObject
-			if err := json.Unmarshal(v, &o); err != nil {
-				return err
-			}
-			out = append(out, o)
-			return nil
-		})
-	})
-	return out, err
-}
-
+// Clear resets a pair's cache to a valid, empty bucket. A missing bucket is the
+// ordinary first-run case and must still end with a bucket present; anything
+// else is a real failure and is reported rather than discarded.
+//
+// Note on reachability: bbolt's public Tx API only ever returns
+// ErrBucketNotFound from a writable, open transaction's DeleteBucket (the root
+// bucket is unexported, so no plain top-level value can be created and
+// ErrIncompatibleValue cannot arise). The error branch below is therefore
+// defensive, but it keeps a future bbolt change or a corrupt file from being
+// reported as a successful reset.
 func (s *Store) Clear(pairID string) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		if err := tx.DeleteBucket(s.bucket(pairID)); err != nil {
-			return nil
+		if err := tx.DeleteBucket(s.bucket(pairID)); err != nil && !errors.Is(err, bbolt.ErrBucketNotFound) {
+			return fmt.Errorf("clear cache bucket for pair %q: %w", pairID, err)
 		}
 		_, err := tx.CreateBucket(s.bucket(pairID))
 		return err

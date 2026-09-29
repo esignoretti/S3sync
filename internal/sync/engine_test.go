@@ -28,6 +28,22 @@ func newTestStore(t *testing.T) *cache.Store {
 	return s
 }
 
+// cachedObjects enumerates a pair's cache through the cursor API the engine
+// itself uses, so tests read the cache the same way production does.
+func cachedObjects(t *testing.T, store *cache.Store, pairID string) []cache.CachedObject {
+	t.Helper()
+	cur, closeCursor, err := store.NewCursor(pairID)
+	if err != nil {
+		t.Fatalf("NewCursor: %v", err)
+	}
+	defer closeCursor()
+	var out []cache.CachedObject
+	for cur.Next() {
+		out = append(out, cur.Object())
+	}
+	return out
+}
+
 // newTestEngine wires an Engine against an httptest S3 endpoint. The SDK-level
 // retryer is disabled so failures surface immediately instead of being retried
 // by the SDK, which would make assertions on call counts unreliable.
@@ -97,10 +113,7 @@ func TestDeleteConvergesAcrossRuns(t *testing.T) {
 		t.Errorf("DELETE calls = %d, want 1 (delete propagation must converge)", deleteCalls)
 	}
 
-	remaining, err := store.List("p1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	remaining := cachedObjects(t, store, "p1")
 	for _, o := range remaining {
 		if o.Key == "gone.txt" {
 			t.Errorf("deleted key still present in cache after successful delete")
@@ -157,10 +170,7 @@ func TestDryRunDoesNotWriteCache(t *testing.T) {
 		t.Fatalf("dry run: %v", err)
 	}
 
-	cached, err := store.List("p1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	cached := cachedObjects(t, store, "p1")
 	if len(cached) != 0 {
 		t.Errorf("cache entries after dry run = %d %v, want 0 (a dry run must not record planned actions)",
 			len(cached), cached)

@@ -232,6 +232,8 @@ If cache is missing or corrupted, `copyObject` does a HEAD on the target — if 
 
 **Throttling:** Each sync pair sets `max_get_ops_per_minute`. Token bucket limits GET/HEAD ops on source. 0 = unlimited.
 
+**Cache lock:** The BoltDB sync cache takes an exclusive 5-second lock, so `s3sync pair sync` fails while `s3sync serve` is running against the same config directory — the server already owns the cache.
+
 **Defaults:** Endpoint `https://s3.cubbit.eu`, region `eu-west-1` (Cubbit DS3).
 
 ## Development
