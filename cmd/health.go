@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -16,7 +17,10 @@ var healthCmd = &cobra.Command{
 		if port == "" {
 			port = "8080"
 		}
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%s/api/health", port))
+		// Bounded timeout: the default client has none, so a hung server would
+		// leave the healthcheck running until Docker's own --timeout fires.
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Get(fmt.Sprintf("http://localhost:%s/api/health", port))
 		if err != nil {
 			os.Exit(1)
 		}

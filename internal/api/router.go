@@ -272,8 +272,10 @@ func (s *Server) Router() *gin.Engine {
 	s.recoverCrashedPairs()
 	r := gin.Default()
 
-	// Auth middleware — enable by setting S3SYNC_API_KEY env var
-	// r.Use(authRequired)
+	// Auth middleware — enabled by setting S3SYNC_API_KEY. When the variable is
+	// unset, authEnabled stays false and the middleware passes every request
+	// through, so enabling this is safe by default.
+	r.Use(authRequired)
 
 	r.GET("/metrics", gin.WrapH(promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{})))
 

@@ -81,7 +81,11 @@ func authRequired(c *gin.Context) {
 		return
 	}
 	path := c.Request.URL.Path
-	if path == "/login" || path == "/api/auth/login" || path == "/api/auth/logout" || strings.HasPrefix(path, "/static/") {
+	// /api/health must stay reachable without credentials. The container
+	// healthcheck runs unauthenticated, so a 401 here marks the container
+	// unhealthy forever and restart:unless-stopped turns that into a restart loop.
+	if path == "/login" || path == "/api/auth/login" || path == "/api/auth/logout" ||
+		path == "/api/health" || strings.HasPrefix(path, "/static/") {
 		c.Next()
 		return
 	}
