@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -124,11 +125,17 @@ func (s *Server) updateBucket(c *gin.Context) {
 }
 
 func (s *Server) deleteBucket(c *gin.Context) {
-	if err := s.repo.DeleteBucket(c.Param("id")); err != nil {
+	err := s.repo.DeleteBucket(c.Param("id"))
+	switch {
+	case err == nil:
+		respond(c, http.StatusOK, gin.H{"deleted": true})
+	case errors.Is(err, config.ErrBucketInUse):
+		// The request is well formed and the bucket exists; the state is what
+		// forbids it, which is a conflict rather than a bad path.
+		respondError(c, http.StatusConflict, err.Error())
+	default:
 		respondError(c, http.StatusNotFound, err.Error())
-		return
 	}
-	respond(c, http.StatusOK, gin.H{"deleted": true})
 }
 
 // --- Sync Pairs ---

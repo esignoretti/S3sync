@@ -2,6 +2,7 @@ package config
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -135,7 +136,34 @@ func (r *Repository) UpdateBucket(b *Bucket) error {
 	return nil
 }
 
+// ErrBucketInUse reports that a bucket cannot be deleted because sync pairs
+// still reference it. Callers use errors.Is to distinguish this from a missing
+// bucket, since the two deserve different answers (conflict vs not found).
+var ErrBucketInUse = errors.New("bucket is still referenced by sync pairs")
+
+// DeleteBucket refuses to remove a bucket that sync pairs still point at.
+// Foreign keys make the database reject the delete anyway; checking first turns
+// that into an error naming the bucket and the reason.
 func (r *Repository) DeleteBucket(id string) error {
+	var name string
+	err := r.db.QueryRow(`SELECT name FROM buckets WHERE id = ?`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("bucket %q not found", id)
+	}
+	if err != nil {
+		return fmt.Errorf("look up bucket %q: %w", id, err)
+	}
+
+	var refs int
+	if err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM sync_pairs WHERE source_bucket_id = ? OR target_bucket_id = ?`, id, id,
+	).Scan(&refs); err != nil {
+		return fmt.Errorf("count sync pairs referencing bucket %q: %w", name, err)
+	}
+	if refs > 0 {
+		return fmt.Errorf("cannot delete bucket %q: %d sync pair(s) still reference it: %w", name, refs, ErrBucketInUse)
+	}
+
 	res, err := r.db.Exec(`DELETE FROM buckets WHERE id = ?`, id)
 	if err != nil {
 		return err
@@ -212,8 +240,20 @@ func (r *Repository) UpdateSyncPair(p *SyncPair) error {
 	return nil
 }
 
+// DeleteSyncPair removes the pair and its sync logs together. sync_logs.pair_id
+// references sync_pairs(id), so with foreign keys enforced the pair delete would
+// otherwise be rejected; the logs of a deleted pair are meaningless anyway.
 func (r *Repository) DeleteSyncPair(id string) error {
-	res, err := r.db.Exec(`DELETE FROM sync_pairs WHERE id = ?`, id)
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+
+	if _, err := tx.Exec(`DELETE FROM sync_logs WHERE pair_id = ?`, id); err != nil {
+		return fmt.Errorf("delete sync logs for pair %q: %w", id, err)
+	}
+	res, err := tx.Exec(`DELETE FROM sync_pairs WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -221,7 +261,7 @@ func (r *Repository) DeleteSyncPair(id string) error {
 	if n == 0 {
 		return fmt.Errorf("sync pair %q not found", id)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // --- Sync Logs ---
