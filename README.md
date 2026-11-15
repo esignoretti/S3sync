@@ -289,7 +289,7 @@ Cubbit DS3 supports neither `Filter` nor `Prefix` in lifecycle rules, so an expi
 
 Moving an expiry date **earlier** needs `--confirm-expire-earlier` on the CLI or a confirmation in the UI. Clearing it with `--target-expire-at ""` leaves the old lifecycle rule in place — the tool warns (`expiry-cleared`) and skips writing an empty rule set, which the endpoint would reject; clear it manually if you mean it.
 
-**After expiry, a pair refuses to run.** Once the date has passed the lifecycle rule has already deleted the target objects, so re-running would re-copy them into a bucket that will expire them again. The pair reports status `expired` and issues no S3 calls. To recover, move the date into the future.
+**After expiry, a pair refuses to run.** Once the date has passed the lifecycle rule has already deleted the target objects, so re-running would re-copy them into a bucket that will expire them again. The pair reports status `expired` and issues no S3 calls. To recover, move the date into the future — via the dashboard, the API, or `s3sync pair update` followed by a restart of `serve` (a CLI update writes the database directly; a running server only picks up changes made through its own API).
 
 ### Advisories
 
