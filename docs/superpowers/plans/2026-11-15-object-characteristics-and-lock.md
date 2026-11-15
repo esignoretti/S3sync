@@ -870,9 +870,9 @@ func TestShouldReconcile(t *testing.T) {
 	}
 }
 
-func TestReconcileEmitsCopyAttributesOnDrift(t *testing.T) {
-	// Two cache entries; the source HEAD for one returns different tags.
-	// Expect exactly one ActionCopyAttributes for the drifted key.
+func TestReconcileEmitsCopyOnDrift(t *testing.T) {
+	// Two cache entries; the source tags for one have changed.
+	// Expect exactly one ActionCopy for the drifted key, and none for the other.
 }
 ```
 
