@@ -464,6 +464,10 @@ func TestCopyObject_TagReadFailureMarksPending(t *testing.T) {
 	if api.putTags != 0 {
 		t.Fatalf("PutObjectTagging called %d times, want 0: there was nothing to write", api.putTags)
 	}
+	// Same partial application as a failed write: no fingerprint to cache.
+	if got.AttrsHash != "" {
+		t.Fatalf("AttrsHash = %q, want empty after a partial attribute application", got.AttrsHash)
+	}
 }
 
 // Metadata and retention travel as directives on the copy request itself.
@@ -513,6 +517,41 @@ func TestCopyObject_StorageClassOverrideWins(t *testing.T) {
 	}
 	if api.copyIn.StorageClass != s3types.StorageClassGlacier {
 		t.Fatalf("StorageClass = %v, want the pair override", api.copyIn.StorageClass)
+	}
+}
+
+// A source whose retention deadline has already passed must still be copied, with
+// no lock fields on the request (a past date makes S3 reject the whole copy) and
+// with a fingerprint that describes the applied state rather than an unknown one.
+func TestCopyObject_ExpiredRetentionCopiesWithoutLock(t *testing.T) {
+	past := time.Now().UTC().Add(-time.Hour)
+	head := &s3.HeadObjectOutput{
+		ContentType:               aws.String("text/csv"),
+		ObjectLockMode:            s3types.ObjectLockModeGovernance,
+		ObjectLockRetainUntilDate: &past,
+	}
+	api := &fakeCopyAPI{headOut: head}
+	wp := newTestWorkerPool(api)
+
+	got, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.copied != 1 {
+		t.Fatalf("CopyObject called %d times, want 1: an expired retention must not block the copy", api.copied)
+	}
+	in := api.copyIn
+	if in.ObjectLockMode != "" || in.ObjectLockRetainUntilDate != nil {
+		t.Fatalf("lock fields sent for an expired retention: %v / %v", in.ObjectLockMode, in.ObjectLockRetainUntilDate)
+	}
+	if aws.ToString(in.ContentType) != "text/csv" {
+		t.Fatalf("ContentType = %q, want the source type", aws.ToString(in.ContentType))
+	}
+	if got.AttrsHash == "" || got.PendingAttrs {
+		t.Fatalf("action = %+v, want hash set and pending false", got)
+	}
+	if want := AttrsFromHead(head).Hash(); got.AttrsHash != want {
+		t.Fatalf("AttrsHash = %q, want %q (the past retention is omitted on both sides)", got.AttrsHash, want)
 	}
 }
 
@@ -581,8 +620,7 @@ func TestCopyObject_HashRecordsEffectiveStorageClass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := AttrsFromHead(api.headOut)
-	want.StorageClass = s3types.StorageClassGlacier
+	want := AttrsFromHead(api.headOut).WithEffectiveStorageClass(wp.storageClass)
 	if got.AttrsHash != want.Hash() {
 		t.Fatalf("AttrsHash = %q, want the effective-class hash %q", got.AttrsHash, want.Hash())
 	}

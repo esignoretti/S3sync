@@ -159,10 +159,9 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction,
 		}
 		// The fingerprint records the class the target will actually have, not the
 		// source's: with a pair override the source class is never applied, so
-		// hashing it would report drift the copy can never fix.
-		if wp.storageClass != "" {
-			attrs.StorageClass = types.StorageClass(wp.storageClass)
-		}
+		// hashing it would report drift the copy can never fix. The reconciler
+		// applies the same transformation before comparing.
+		attrs = attrs.WithEffectiveStorageClass(wp.storageClass)
 	}
 
 	// No target-side ETag comparison: the differ already decided this object
@@ -296,6 +295,10 @@ func (wp *WorkerPool) sourceTags(ctx context.Context, key string) ([]types.Tag, 
 // An empty set is written too, so a source whose tags were all removed clears
 // the target's: the target's tags must equal the source's, not merely be a
 // superset of whatever an earlier write left behind.
+//
+// This assumes the endpoint accepts an empty <TagSet/>: some S3 implementations
+// reject it as MalformedXML, and then a tagless object would sit in
+// pending_attrs forever. Needs an integration check in Task 9.
 func (wp *WorkerPool) applyTags(ctx context.Context, key string, tags []types.Tag, versionID *string) error {
 	return retryS3(ctx, "PutObjectTagging", func(c context.Context) error {
 		in := &s3.PutObjectTaggingInput{

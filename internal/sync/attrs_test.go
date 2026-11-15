@@ -137,6 +137,30 @@ func TestAttrsHashIsNotEmpty(t *testing.T) {
 	}
 }
 
+// The fingerprint must describe the effective target class. Hash alone hashes
+// the class it is given, so WithEffectiveStorageClass is what makes the writer
+// and the reconciler agree on a pair that overrides the class.
+func TestWithEffectiveStorageClassChangesHash(t *testing.T) {
+	source := ObjectAttrs{StorageClass: types.StorageClassStandard}
+	effective := source.WithEffectiveStorageClass("STANDARD_IA")
+
+	if effective.StorageClass != types.StorageClassStandardIa {
+		t.Fatalf("StorageClass = %v, want the effective class", effective.StorageClass)
+	}
+	if source.StorageClass != types.StorageClassStandard {
+		t.Fatal("WithEffectiveStorageClass mutated the receiver's class")
+	}
+	if source.Hash() == effective.Hash() {
+		t.Fatal("hash must differ between the source class and the effective class")
+	}
+
+	// No override means the source class is what the target carries, so the
+	// transformation must be a no-op rather than clearing it.
+	if got, want := source.WithEffectiveStorageClass("").Hash(), source.Hash(); got != want {
+		t.Fatalf("empty override changed the hash: %q, want %q", got, want)
+	}
+}
+
 func TestAttrsFromHead(t *testing.T) {
 	until := time.Now().UTC().Add(24 * time.Hour)
 	out := &s3.HeadObjectOutput{

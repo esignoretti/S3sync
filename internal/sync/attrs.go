@@ -58,10 +58,26 @@ func (a ObjectAttrs) liveRetention(now time.Time) bool {
 	return a.RetainUntil != nil && a.RetainUntil.After(now)
 }
 
+// WithEffectiveStorageClass returns a copy of a with StorageClass replaced by sc
+// when sc is non-empty. Callers must apply this before Hash() so that the
+// fingerprint describes what the target will actually carry, not what the
+// source had.
+func (a ObjectAttrs) WithEffectiveStorageClass(sc string) ObjectAttrs {
+	if sc == "" {
+		return a
+	}
+	a.StorageClass = types.StorageClass(sc)
+	return a
+}
+
 // Hash is a canonical fingerprint of the replicated characteristics. It is
 // stable across map iteration order and metadata key case, so the same object
 // state always yields the same value; an empty hash means "unknown" (an entry
 // written before this feature existed) and never "matches".
+//
+// StorageClass is hashed as given, so callers must set it to the effective target
+// class first with WithEffectiveStorageClass: the writer and the reconciler must
+// fingerprint the same state or they never agree.
 func (a ObjectAttrs) Hash() string {
 	now := time.Now().UTC()
 
