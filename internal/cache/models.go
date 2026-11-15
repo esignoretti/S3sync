@@ -9,4 +9,6 @@ type CachedObject struct {
 	Size         int64     `json:"size"`
 	LastModified time.Time `json:"last_modified"`
 	SyncedAt     time.Time `json:"synced_at"`
+	AttrsHash    string    `json:"attrs_hash,omitempty"`
+	PendingAttrs bool      `json:"pending_attrs,omitempty"`
 }

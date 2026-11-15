@@ -72,6 +72,16 @@ func migrate(db *sql.DB) error {
 		`ALTER TABLE sync_pairs ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sync_pairs ADD COLUMN webhook_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sync_pairs ADD COLUMN webhook_events TEXT NOT NULL DEFAULT 'error'`,
+		`ALTER TABLE sync_pairs ADD COLUMN replicate_attributes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sync_pairs ADD COLUMN target_expire_at TEXT`,
+		`ALTER TABLE sync_pairs ADD COLUMN noncurrent_expire_days INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sync_pairs ADD COLUMN newer_noncurrent_versions INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sync_pairs ADD COLUMN require_object_lock INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sync_pairs ADD COLUMN on_lock_missing TEXT NOT NULL DEFAULT 'fail'`,
+		`ALTER TABLE sync_pairs ADD COLUMN attrs_reconcile_interval INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sync_pairs ADD COLUMN provisioned_at TEXT`,
+		`ALTER TABLE sync_pairs ADD COLUMN provision_error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sync_pairs ADD COLUMN last_reconcile_at TEXT`,
 	}
 	for _, m := range migrations {
 		db.Exec(m) // ignore error if column already exists

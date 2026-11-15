@@ -152,20 +152,26 @@ func (r *Repository) CreateSyncPair(p *SyncPair) error {
 		`INSERT INTO sync_pairs (id,name,source_bucket_id,target_bucket_id,
 		 sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,
 		 target_storage_class,enabled,dry_run,webhook_url,webhook_events,
-		 last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at,
+		 replicate_attributes,target_expire_at,noncurrent_expire_days,
+		 newer_noncurrent_versions,require_object_lock,on_lock_missing,
+		 attrs_reconcile_interval,provisioned_at,provision_error,last_reconcile_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.SourceBucketID, p.TargetBucketID,
 		p.SyncInterval, p.WorkerCount, p.MaxGetOpsPerMinute, boolInt(p.DeletePropagation),
 		nullStr(p.TargetStorageClass), boolInt(p.Enabled), boolInt(p.DryRun),
 		p.WebhookURL, p.WebhookEvents,
 		nullTimeRFC(p.LastSyncAt), p.LastSyncStatus,
 		p.ConsecutiveErrors, rfc(p.CreatedAt), rfc(p.UpdatedAt),
+		boolInt(p.ReplicateAttributes), nullTimeRFC(p.TargetExpireAt), p.NoncurrentExpireDays,
+		p.NewerNoncurrentVersions, boolInt(p.RequireObjectLock), onLockMissing(p.OnLockMissing),
+		p.AttrsReconcileInterval, nullTimeRFC(p.ProvisionedAt), p.ProvisionError, nullTimeRFC(p.LastReconcileAt),
 	)
 	return err
 }
 
 func (r *Repository) ListSyncPairs() ([]SyncPair, error) {
-	rows, err := r.db.Query(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs ORDER BY name`)
+	rows, err := r.db.Query(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at,replicate_attributes,target_expire_at,noncurrent_expire_days,newer_noncurrent_versions,require_object_lock,on_lock_missing,attrs_reconcile_interval,provisioned_at,provision_error,last_reconcile_at FROM sync_pairs ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +180,7 @@ func (r *Repository) ListSyncPairs() ([]SyncPair, error) {
 }
 
 func (r *Repository) GetSyncPair(id string) (*SyncPair, error) {
-	row := r.db.QueryRow(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at FROM sync_pairs WHERE id = ?`, id)
+	row := r.db.QueryRow(`SELECT id,name,source_bucket_id,target_bucket_id,sync_interval,worker_count,max_get_ops_per_minute,delete_propagation,target_storage_class,enabled,dry_run,webhook_url,webhook_events,last_sync_at,last_sync_status,consecutive_errors,created_at,updated_at,replicate_attributes,target_expire_at,noncurrent_expire_days,newer_noncurrent_versions,require_object_lock,on_lock_missing,attrs_reconcile_interval,provisioned_at,provision_error,last_reconcile_at FROM sync_pairs WHERE id = ?`, id)
 	return scanSyncPair(row)
 }
 
@@ -184,13 +190,21 @@ func (r *Repository) UpdateSyncPair(p *SyncPair) error {
 		`UPDATE sync_pairs SET name=?,source_bucket_id=?,target_bucket_id=?,
 		 sync_interval=?,worker_count=?,max_get_ops_per_minute=?,delete_propagation=?,
 		 target_storage_class=?,enabled=?,dry_run=?,webhook_url=?,webhook_events=?,
-		 last_sync_at=?,last_sync_status=?,consecutive_errors=?,updated_at=? WHERE id=?`,
+		 last_sync_at=?,last_sync_status=?,consecutive_errors=?,updated_at=?,
+		 replicate_attributes=?,target_expire_at=?,noncurrent_expire_days=?,
+		 newer_noncurrent_versions=?,require_object_lock=?,on_lock_missing=?,
+		 attrs_reconcile_interval=?,provisioned_at=?,provision_error=?,last_reconcile_at=?
+		 WHERE id=?`,
 		p.Name, p.SourceBucketID, p.TargetBucketID,
 		p.SyncInterval, p.WorkerCount, p.MaxGetOpsPerMinute, boolInt(p.DeletePropagation),
 		nullStr(p.TargetStorageClass), boolInt(p.Enabled), boolInt(p.DryRun),
 		p.WebhookURL, p.WebhookEvents,
 		nullTimeRFC(p.LastSyncAt), p.LastSyncStatus,
-		p.ConsecutiveErrors, rfc(p.UpdatedAt), p.ID,
+		p.ConsecutiveErrors, rfc(p.UpdatedAt),
+		boolInt(p.ReplicateAttributes), nullTimeRFC(p.TargetExpireAt), p.NoncurrentExpireDays,
+		p.NewerNoncurrentVersions, boolInt(p.RequireObjectLock), onLockMissing(p.OnLockMissing),
+		p.AttrsReconcileInterval, nullTimeRFC(p.ProvisionedAt), p.ProvisionError, nullTimeRFC(p.LastReconcileAt),
+		p.ID,
 	)
 	if err != nil {
 		return err
@@ -294,10 +308,10 @@ type rowScanner interface {
 
 func scanBucketFromRow(s rowScanner) (*Bucket, error) {
 	var (
-		b        Bucket
-		ol, ver  int
-		c, u     string
-		rm, rd   sql.NullString
+		b       Bucket
+		ol, ver int
+		c, u    string
+		rm, rd  sql.NullString
 	)
 	err := s.Scan(&b.ID, &b.Name, &b.Endpoint, &b.Region,
 		&b.AccessKey, &b.SecretKey, &b.BucketName,
@@ -334,28 +348,48 @@ func scanSyncPair(row *sql.Row) (*SyncPair, error) {
 
 func scanSyncPairFromRow(s rowScanner) (*SyncPair, error) {
 	var (
-		p           SyncPair
-		en, dp, dr  int
-		c, u        string
-		lsa         sql.NullString
-		ce          sql.NullInt64
-		tsc         sql.NullString
+		p                   SyncPair
+		en, dp, dr, ra, rol int
+		c, u                string
+		lsa, tea, pa, lra   sql.NullString
+		ce                  sql.NullInt64
+		tsc                 sql.NullString
+		ned, nvn, ari       sql.NullInt64
 	)
 	err := s.Scan(&p.ID, &p.Name, &p.SourceBucketID, &p.TargetBucketID,
 		&p.SyncInterval, &p.WorkerCount, &p.MaxGetOpsPerMinute, &dp,
 		&tsc, &en, &dr, &p.WebhookURL, &p.WebhookEvents,
 		&lsa, &p.LastSyncStatus,
-		&ce, &c, &u)
+		&ce, &c, &u,
+		&ra, &tea, &ned, &nvn, &rol, &p.OnLockMissing,
+		&ari, &pa, &p.ProvisionError, &lra)
 	if err != nil {
 		return nil, err
 	}
 	p.Enabled = en == 1
 	p.DeletePropagation = dp == 1
 	p.DryRun = dr == 1
+	p.ReplicateAttributes = ra == 1
+	p.RequireObjectLock = rol == 1
+	p.NoncurrentExpireDays = int(ned.Int64)
+	p.NewerNoncurrentVersions = int(nvn.Int64)
+	p.AttrsReconcileInterval = int(ari.Int64)
 	p.TargetStorageClass = tsc.String
 	if lsa.Valid {
 		t, _ := time.Parse(time.RFC3339, lsa.String)
 		p.LastSyncAt = &t
+	}
+	if tea.Valid {
+		t, _ := time.Parse(time.RFC3339, tea.String)
+		p.TargetExpireAt = &t
+	}
+	if pa.Valid {
+		t, _ := time.Parse(time.RFC3339, pa.String)
+		p.ProvisionedAt = &t
+	}
+	if lra.Valid {
+		t, _ := time.Parse(time.RFC3339, lra.String)
+		p.LastReconcileAt = &t
 	}
 	p.ConsecutiveErrors = int(ce.Int64)
 	p.CreatedAt, _ = time.Parse(time.RFC3339, c)
@@ -366,24 +400,41 @@ func scanSyncPairFromRow(s rowScanner) (*SyncPair, error) {
 // --- value helpers ---
 
 func boolInt(b bool) int {
-	if b { return 1 }
+	if b {
+		return 1
+	}
 	return 0
 }
 
 func nullStr(s string) *string {
-	if s == "" { return nil }
+	if s == "" {
+		return nil
+	}
 	return &s
 }
 
 func nullInt(n int) *int {
-	if n == 0 { return nil }
+	if n == 0 {
+		return nil
+	}
 	return &n
 }
 
 func nullTimeRFC(t *time.Time) *string {
-	if t == nil { return nil }
+	if t == nil {
+		return nil
+	}
 	s := t.Format(time.RFC3339)
 	return &s
+}
+
+// onLockMissing maps the zero value to the column's SQL default so fresh and
+// legacy pairs read back 'fail' uniformly.
+func onLockMissing(s string) string {
+	if s == "" {
+		return "fail"
+	}
+	return s
 }
 
 func rfc(t time.Time) string {
