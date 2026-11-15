@@ -17,7 +17,9 @@ func TestValidateExpireAt(t *testing.T) {
 		wantErr error
 	}{
 		{"midnight future", time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), nil},
-		{"midnight future other tz", time.Date(2027, 1, 1, 0, 0, 0, 0, time.FixedZone("x", 3600)), nil},
+		{"midnight future zero-offset tz", time.Date(2027, 1, 1, 0, 0, 0, 0, time.FixedZone("utc", 0)), nil},
+		{"midnight in utc other tz wall clock", time.Date(2027, 1, 1, 1, 0, 0, 0, time.FixedZone("x", 3600)), nil},
+		{"local midnight not midnight utc", time.Date(2027, 1, 1, 0, 0, 0, 0, time.FixedZone("x", 3600)), ErrExpireNotMidnight},
 		{"not midnight", time.Date(2027, 1, 1, 9, 30, 0, 0, time.UTC), ErrExpireNotMidnight},
 		{"past", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), ErrExpireInPast},
 	}
