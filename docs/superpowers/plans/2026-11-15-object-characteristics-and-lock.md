@@ -990,7 +990,7 @@ git commit -m "feat(sync): expired-pair guard, pending-attrs counter, provisioni
 
 **Interfaces:**
 - Consumes: `ProvisionTarget` (Task 3), `ValidateExpireAt` (Task 2), `config.SyncPair` fields (Task 1).
-- Produces: `func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error` in `internal/sync/run.go`; `func ValidatePairOptions(pair *config.SyncPair, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time) error` in `internal/sync/provision.go`.
+- Produces: `func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error` in `internal/sync/run.go`; `func ValidatePairOptions(pair *config.SyncPair, retentionMode string, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)` and `type AdvisoryWarning struct { Code, Message string }` in `internal/sync/provision.go`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1042,7 +1042,15 @@ func TestValidatePairOptions(t *testing.T) {
 }
 ```
 
-Also a test for the compliance rule: `ValidatePairOptions` takes a `retentionMode string` parameter; `"COMPLIANCE"` with `acceptCompliance == false` returns `ErrComplianceNeedsConfirm`. Adjust the signature to `ValidatePairOptions(pair *config.SyncPair, retentionMode string, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time) error`.
+Also a test for the compliance rule: `ValidatePairOptions` takes a `retentionMode string` parameter; `"COMPLIANCE"` with `acceptCompliance == false` returns `ErrComplianceNeedsConfirm`. Adjust the signature to `ValidatePairOptions(pair *config.SyncPair, retentionMode string, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)`.
+
+**Advisory warnings (spec §7.2), added by controller ruling during Task 3 review.** `ValidatePairOptions` also returns `[]AdvisoryWarning` with three codes, none of which are errors and none of which block pair creation:
+
+- `noncurrent-recommended` — `RequireObjectLock` is set but `NoncurrentExpireDays == 0`, so versioning-plus-lock accumulates noncurrent versions with no expiry signal.
+- `retention-past-expiry` — the bucket's default retention applied today would outlast `TargetExpireAt` (`retentionMode != ""`, `RetentionDays > 0`, `now + RetentionDays*24h > *TargetExpireAt`). The message must say the retention will outlive the expiry and that lifecycle deletion skips locked versions rather than deleting them.
+- `expiry-cleared` — `previousExpireAt != nil && pair.TargetExpireAt == nil`. The message must say the existing `s3sync-expire` lifecycle rule is NOT removed by this change (an empty rule set is skipped rather than written, because an empty `Rules` list is rejected as `MalformedXML`) and that the user must clear it on the bucket manually.
+
+Both CLI commands print every warning to stderr as `warning: <message>` before proceeding. `now` is a parameter for determinism; when zero, use `time.Now().UTC()`. See the task brief for the exact test table.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
