@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -12,7 +13,7 @@ import (
 )
 
 func TestWorkerPoolCreation(t *testing.T) {
-	pool := NewWorkerPool(5, nil, "src", "tgt", NewThrottler(0), "", nil)
+	pool := NewWorkerPool(5, nil, nil, "src", "tgt", NewThrottler(0), "", nil, false)
 	if pool == nil {
 		t.Fatal("expected non-nil pool")
 	}
@@ -25,8 +26,20 @@ type fakeCopyAPI struct {
 	headErr      error
 	headLen      int64
 	headBucket   string
+	headOut      *s3.HeadObjectOutput
 	copyIn       *s3.CopyObjectInput
+	copyOut      *s3.CopyObjectOutput
+	copyErr      error
 	deleteBucket string
+
+	tags       []s3types.Tag
+	getTagsErr error
+	putTagsErr error
+	getTags    int
+	putTags    int
+	lastTags   []s3types.Tag
+	putTagsIn  *s3.PutObjectTaggingInput
+	getTagsIn  *s3.GetObjectTaggingInput
 }
 
 // testSourceBucket/testTargetBucket are the bucket names newTestWorkerPool uses,
@@ -48,20 +61,42 @@ func (f *fakeCopyAPI) HeadObject(_ context.Context, in *s3.HeadObjectInput, _ ..
 	if f.headErr != nil {
 		return nil, f.headErr
 	}
+	if f.headOut != nil {
+		return f.headOut, nil
+	}
 	return &s3.HeadObjectOutput{ContentLength: aws.Int64(f.headLen)}, nil
 }
 
 func (f *fakeCopyAPI) CopyObject(_ context.Context, in *s3.CopyObjectInput, _ ...func(*s3.Options)) (*s3.CopyObjectOutput, error) {
 	f.copied++
 	f.copyIn = in
+	if f.copyErr != nil {
+		return nil, f.copyErr
+	}
+	if f.copyOut != nil {
+		return f.copyOut, nil
+	}
 	return &s3.CopyObjectOutput{}, nil
 }
 
-func (f *fakeCopyAPI) GetObjectTagging(context.Context, *s3.GetObjectTaggingInput, ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error) {
-	return &s3.GetObjectTaggingOutput{}, nil
+func (f *fakeCopyAPI) GetObjectTagging(_ context.Context, in *s3.GetObjectTaggingInput, _ ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error) {
+	f.getTags++
+	f.getTagsIn = in
+	if f.getTagsErr != nil {
+		return nil, f.getTagsErr
+	}
+	return &s3.GetObjectTaggingOutput{TagSet: f.tags}, nil
 }
 
-func (f *fakeCopyAPI) PutObjectTagging(context.Context, *s3.PutObjectTaggingInput, ...func(*s3.Options)) (*s3.PutObjectTaggingOutput, error) {
+func (f *fakeCopyAPI) PutObjectTagging(_ context.Context, in *s3.PutObjectTaggingInput, _ ...func(*s3.Options)) (*s3.PutObjectTaggingOutput, error) {
+	f.putTags++
+	f.putTagsIn = in
+	if in.Tagging != nil {
+		f.lastTags = in.Tagging.TagSet
+	}
+	if f.putTagsErr != nil {
+		return nil, f.putTagsErr
+	}
 	return &s3.PutObjectTaggingOutput{}, nil
 }
 
@@ -73,7 +108,18 @@ func (f *fakeCopyAPI) DeleteObject(_ context.Context, in *s3.DeleteObjectInput, 
 // The real client must satisfy copyAPI with no adapter type.
 var _ copyAPI = (*s3.Client)(nil)
 
+// newTestWorkerPool builds a pool with attribute replication on, which is what
+// the tag and fingerprint tests assert. Tests that need the legacy behaviour use
+// newTestWorkerPoolWithoutAttrs.
 func newTestWorkerPool(api copyAPI) *WorkerPool {
+	return &WorkerPool{
+		workers: 1, src: api, tgt: api,
+		sourceBucket: testSourceBucket, targetBucket: testTargetBucket,
+		throttler: NewThrottler(0), replicateAttrs: true,
+	}
+}
+
+func newTestWorkerPoolWithoutAttrs(api copyAPI) *WorkerPool {
 	return &WorkerPool{
 		workers: 1, src: api, tgt: api,
 		sourceBucket: testSourceBucket, targetBucket: testTargetBucket,
@@ -104,7 +150,7 @@ func TestWorkerPoolRun_CopiesNewObjectAndReportsSuccess(t *testing.T) {
 func TestCopyObject_HeadsSourceAndCopiesFromIt(t *testing.T) {
 	api := &fakeCopyAPI{headLen: 10}
 	wp := newTestWorkerPool(api)
-	if err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e1"`}); err != nil {
+	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e1"`}); err != nil {
 		t.Fatal(err)
 	}
 	if api.headBucket != testSourceBucket {
@@ -123,7 +169,7 @@ func TestCopyObject_HeadsSourceAndCopiesFromIt(t *testing.T) {
 func TestCopyObject_SourceVanishedIsSkipped(t *testing.T) {
 	api := &fakeCopyAPI{headErr: &s3types.NotFound{}}
 	wp := newTestWorkerPool(api)
-	err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "gone", ETag: `"e1"`})
+	_, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "gone", ETag: `"e1"`})
 	if !errors.Is(err, errObjectVanished) {
 		t.Fatalf("copyObject returned %v; a vanished source must report errObjectVanished", err)
 	}
@@ -162,7 +208,7 @@ func TestCopyObject_SourceHeadErrorIsRetriedAndFails(t *testing.T) {
 	boom := errors.New("connection reset")
 	api := &fakeCopyAPI{headErr: boom}
 	wp := newTestWorkerPool(api)
-	err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e1"`})
+	_, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e1"`})
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want it to wrap the HEAD failure", err)
 	}
@@ -232,7 +278,7 @@ func TestWorkerPoolRun_DeleteRoutesToTarget(t *testing.T) {
 func TestCopyObject_TooLarge(t *testing.T) {
 	api := &fakeCopyAPI{headLen: 6 << 30}
 	wp := newTestWorkerPool(api)
-	err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`})
+	_, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`})
 	if !errors.Is(err, ErrObjectTooLarge) {
 		t.Fatalf("err = %v, want ErrObjectTooLarge", err)
 	}
@@ -251,7 +297,7 @@ func TestCopyObject_TooLarge(t *testing.T) {
 func TestCopyObject_ExactlyFiveGiBIsCopied(t *testing.T) {
 	api := &fakeCopyAPI{headLen: 5 << 30}
 	wp := newTestWorkerPool(api)
-	if err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "edge", ETag: `"e"`}); err != nil {
+	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "edge", ETag: `"e"`}); err != nil {
 		t.Fatalf("copyObject returned %v; 5 GiB is allowed", err)
 	}
 	if api.copied != 1 {
@@ -314,5 +360,261 @@ func TestRetryS3_ContextCancel(t *testing.T) {
 	}, 5)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected Canceled, got %v", err)
+	}
+}
+
+// --- attribute pipeline -----------------------------------------------------
+
+// The endpoint does not apply x-amz-tagging on CopyObject, so tags must travel
+// through GetObjectTagging on the source and PutObjectTagging on the target, and
+// the resulting fingerprint must cover them.
+func TestCopyObject_AppliesTagsAndRecordsHash(t *testing.T) {
+	head := &s3.HeadObjectOutput{
+		ContentType: aws.String("text/csv"),
+		Metadata:    map[string]string{"a": "b"},
+	}
+	api := &fakeCopyAPI{
+		headOut: head,
+		tags:    []s3types.Tag{{Key: aws.String("env"), Value: aws.String("prod")}},
+	}
+	wp := newTestWorkerPool(api)
+
+	got, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.putTags != 1 {
+		t.Fatalf("PutObjectTagging called %d times, want 1", api.putTags)
+	}
+	if len(api.lastTags) != 1 || aws.ToString(api.lastTags[0].Key) != "env" {
+		t.Fatalf("tags not applied: %+v", api.lastTags)
+	}
+	if aws.ToString(api.getTagsIn.Bucket) != testSourceBucket {
+		t.Fatalf("GetObjectTagging hit bucket %q, want the source bucket", aws.ToString(api.getTagsIn.Bucket))
+	}
+	if aws.ToString(api.putTagsIn.Bucket) != testTargetBucket {
+		t.Fatalf("PutObjectTagging hit bucket %q, want the target bucket", aws.ToString(api.putTagsIn.Bucket))
+	}
+	if got.AttrsHash == "" || got.PendingAttrs {
+		t.Fatalf("action = %+v, want hash set and pending false", got)
+	}
+
+	// The fingerprint must describe what was applied: source HEAD fields plus
+	// the tags fetched separately. If tags were dropped the two would match.
+	withTags := AttrsFromHead(head)
+	withTags.Tags = api.tags
+	if got.AttrsHash != withTags.Hash() {
+		t.Fatalf("AttrsHash = %q, want %q", got.AttrsHash, withTags.Hash())
+	}
+	if got.AttrsHash == AttrsFromHead(head).Hash() {
+		t.Fatal("AttrsHash ignored the tags; the tag component of the fingerprint was dropped")
+	}
+}
+
+// Tags are applied to the version CopyObject created, not to whatever is
+// current on the target.
+func TestCopyObject_TagsTargetTheCopiedVersion(t *testing.T) {
+	api := &fakeCopyAPI{
+		headOut: &s3.HeadObjectOutput{},
+		copyOut: &s3.CopyObjectOutput{VersionId: aws.String("v2")},
+		tags:    []s3types.Tag{{Key: aws.String("env"), Value: aws.String("prod")}},
+	}
+	wp := newTestWorkerPool(api)
+	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`}); err != nil {
+		t.Fatal(err)
+	}
+	if aws.ToString(api.putTagsIn.VersionId) != "v2" {
+		t.Fatalf("VersionId = %q, want the version CopyObject returned", aws.ToString(api.putTagsIn.VersionId))
+	}
+}
+
+// Bytes are correct even when the tag write fails, so the object must be
+// reported as copied with attributes pending, not as a failed copy.
+func TestCopyObject_TagFailureMarksPending(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{}, putTagsErr: errors.New("nope")}
+	wp := newTestWorkerPool(api)
+	got, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if err != nil {
+		t.Fatalf("a tag failure must not fail the copy: %v", err)
+	}
+	if !got.PendingAttrs {
+		t.Fatal("PendingAttrs must be true after a tag failure")
+	}
+	if api.copied != 1 {
+		t.Fatalf("bytes were copied %d times, want 1", api.copied)
+	}
+	// The target's attribute state is partially applied, so the cache must not
+	// claim a fingerprint it cannot vouch for.
+	if got.AttrsHash != "" {
+		t.Fatalf("AttrsHash = %q, want empty after a partial attribute application", got.AttrsHash)
+	}
+}
+
+// A failed tag read is the same partial application as a failed tag write.
+func TestCopyObject_TagReadFailureMarksPending(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{}, getTagsErr: errors.New("nope")}
+	wp := newTestWorkerPool(api)
+	got, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if err != nil {
+		t.Fatalf("a tag read failure must not fail the copy: %v", err)
+	}
+	if !got.PendingAttrs {
+		t.Fatal("PendingAttrs must be true after a tag read failure")
+	}
+	if api.putTags != 0 {
+		t.Fatalf("PutObjectTagging called %d times, want 0: there was nothing to write", api.putTags)
+	}
+}
+
+// Metadata and retention travel as directives on the copy request itself.
+func TestCopyObject_AppliesMetadataAndLockToCopyInput(t *testing.T) {
+	until := time.Now().UTC().Add(24 * time.Hour)
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{
+		ContentType:               aws.String("image/png"),
+		ContentEncoding:           aws.String("gzip"),
+		Metadata:                  map[string]string{"owner": "ops"},
+		StorageClass:              s3types.StorageClassStandardIa,
+		ObjectLockMode:            s3types.ObjectLockModeCompliance,
+		ObjectLockRetainUntilDate: &until,
+		ObjectLockLegalHoldStatus: s3types.ObjectLockLegalHoldStatusOn,
+	}}
+	wp := newTestWorkerPool(api)
+	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`}); err != nil {
+		t.Fatal(err)
+	}
+	in := api.copyIn
+	if in.MetadataDirective != s3types.MetadataDirectiveReplace {
+		t.Fatalf("MetadataDirective = %v, want REPLACE: COPY is not reliable on this endpoint", in.MetadataDirective)
+	}
+	if aws.ToString(in.ContentType) != "image/png" || aws.ToString(in.ContentEncoding) != "gzip" {
+		t.Fatalf("content headers not passed: %v / %v", aws.ToString(in.ContentType), aws.ToString(in.ContentEncoding))
+	}
+	if in.Metadata["owner"] != "ops" {
+		t.Fatalf("metadata = %+v", in.Metadata)
+	}
+	if in.StorageClass != s3types.StorageClassStandardIa {
+		t.Fatalf("StorageClass = %v, want the source class", in.StorageClass)
+	}
+	if in.ObjectLockMode != s3types.ObjectLockModeCompliance || in.ObjectLockRetainUntilDate == nil {
+		t.Fatalf("lock fields not passed: %v / %v", in.ObjectLockMode, in.ObjectLockRetainUntilDate)
+	}
+	if in.ObjectLockLegalHoldStatus != s3types.ObjectLockLegalHoldStatusOn {
+		t.Fatalf("legal hold = %v", in.ObjectLockLegalHoldStatus)
+	}
+}
+
+// A pair that overrides the storage class keeps overriding it.
+func TestCopyObject_StorageClassOverrideWins(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassStandardIa}}
+	wp := newTestWorkerPool(api)
+	wp.storageClass = "GLACIER"
+	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`}); err != nil {
+		t.Fatal(err)
+	}
+	if api.copyIn.StorageClass != s3types.StorageClassGlacier {
+		t.Fatalf("StorageClass = %v, want the pair override", api.copyIn.StorageClass)
+	}
+}
+
+// The backward-compatibility contract: with attribute replication off the copy
+// request is exactly the legacy one and no attribute call is made.
+func TestCopyObject_WithoutAttrReplicationTouchesNoAttributes(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{
+		ContentType:               aws.String("text/csv"),
+		Metadata:                  map[string]string{"a": "b"},
+		StorageClass:              s3types.StorageClassStandardIa,
+		ObjectLockMode:            s3types.ObjectLockModeCompliance,
+		ObjectLockRetainUntilDate: aws.Time(time.Now().UTC().Add(time.Hour)),
+	}}
+	wp := newTestWorkerPoolWithoutAttrs(api)
+
+	got, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.getTags != 0 || api.putTags != 0 {
+		t.Fatalf("tag calls: %d get, %d put; want 0 with replicateAttrs off", api.getTags, api.putTags)
+	}
+	in := api.copyIn
+	if in.MetadataDirective != "" || in.ContentType != nil || in.Metadata != nil ||
+		in.ObjectLockMode != "" || in.ObjectLockRetainUntilDate != nil || in.ObjectLockLegalHoldStatus != "" {
+		t.Fatalf("copy request carries attributes with replication off: %+v", in)
+	}
+	if in.StorageClass != "" {
+		t.Fatalf("StorageClass = %v, want unset: the source class is not copied when replication is off", in.StorageClass)
+	}
+	// Empty means "unknown", never "matches".
+	if got.AttrsHash != "" || got.PendingAttrs {
+		t.Fatalf("action = %+v, want no hash and not pending", got)
+	}
+}
+
+// Run must hand the enriched action to the cache writer.
+func TestWorkerPoolRun_PropagatesAttrsHash(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{ContentType: aws.String("text/csv")}}
+	wp := newTestWorkerPool(api)
+	actions := make(chan SyncAction, 1)
+	actions <- SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`}
+	close(actions)
+
+	succeeded, _, failed := wp.Run(context.Background(), actions)
+	if failed != 0 || len(succeeded) != 1 {
+		t.Fatalf("Run: succeeded %d, failed %d", len(succeeded), failed)
+	}
+	if succeeded[0].AttrsHash == "" {
+		t.Fatal("Run dropped the fingerprint; the cache entry would record an unknown attribute state")
+	}
+	if succeeded[0].Key != "k" || succeeded[0].ETag != `"e"` {
+		t.Fatalf("Run lost the action's identity: %+v", succeeded[0])
+	}
+}
+
+// The fingerprint must describe the target's effective class. With a pair
+// override the source class is never applied, so hashing it would make the
+// reconciler report drift the copy can never resolve.
+func TestCopyObject_HashRecordsEffectiveStorageClass(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassStandardIa}}
+	wp := newTestWorkerPool(api)
+	wp.storageClass = "GLACIER"
+
+	got, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := AttrsFromHead(api.headOut)
+	want.StorageClass = s3types.StorageClassGlacier
+	if got.AttrsHash != want.Hash() {
+		t.Fatalf("AttrsHash = %q, want the effective-class hash %q", got.AttrsHash, want.Hash())
+	}
+	if got.AttrsHash == AttrsFromHead(api.headOut).Hash() {
+		t.Fatal("AttrsHash recorded the source class, which the target never receives")
+	}
+}
+
+// A source whose tags were all removed must clear the target's, so the empty set
+// is written rather than skipped: the target's tags must equal the source's, not
+// merely be a superset of whatever an earlier write left behind.
+func TestCopyObject_TaglessSourceClearsTargetTags(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{}}
+	wp := newTestWorkerPool(api)
+
+	got, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.getTags != 1 {
+		t.Fatalf("GetObjectTagging called %d times, want 1", api.getTags)
+	}
+	if api.putTags != 1 {
+		t.Fatalf("PutObjectTagging called %d times, want 1: an empty set must clear the target's tags", api.putTags)
+	}
+	if len(api.lastTags) != 0 {
+		t.Fatalf("TagSet = %+v, want empty", api.lastTags)
+	}
+	if got.PendingAttrs {
+		t.Fatal("a tagless source is fully applied, not pending")
+	}
+	if got.AttrsHash == "" {
+		t.Fatal("a tagless source still has a fingerprint")
 	}
 }

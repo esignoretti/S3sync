@@ -23,6 +23,13 @@ type SyncAction struct {
 	ETag         string
 	Size         int64
 	LastModified time.Time
+	// AttrsHash is the fingerprint of the characteristics applied to the copy.
+	// Empty means unknown (attribute replication off, or a partial application),
+	// never that the target matches the source.
+	AttrsHash string
+	// PendingAttrs reports that the bytes were copied but the characteristics
+	// were not fully applied, so the next cycle retries them without re-copying.
+	PendingAttrs bool
 }
 
 const maxS3Keys = 1000

@@ -66,14 +66,8 @@ func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
 
 	thr := NewThrottler(pair.MaxGetOpsPerMinute)
 	progress := &Progress{}
-	pool := NewWorkerPool(pair.WorkerCount, tgtS3,
-		src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass, progress)
-	// NewWorkerPool takes one client and uses it for both sides, which is wrong
-	// here: the copy path HEADs the source object, and a pair whose buckets carry
-	// different credentials or endpoints needs the source client for that call.
-	// Left on the target client, every source HEAD is a 403 (all objects fail) or
-	// a 404 (all objects look vanished).
-	pool.src = srcS3
+	pool := NewWorkerPool(pair.WorkerCount, srcS3, tgtS3,
+		src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass, progress, pair.ReplicateAttributes)
 	return &Engine{
 		pair:      pair,
 		src:       src,
@@ -214,6 +208,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 			PairID: e.pair.ID, Key: a.Key,
 			ETag: a.ETag, Size: a.Size,
 			LastModified: a.LastModified, SyncedAt: now,
+			AttrsHash: a.AttrsHash, PendingAttrs: a.PendingAttrs,
 		})
 	}
 	if err := e.store.PutMany(cached); err != nil {

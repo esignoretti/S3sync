@@ -14,14 +14,15 @@ import (
 )
 
 type WorkerPool struct {
-	workers      int
-	src          copyAPI
-	tgt          copyAPI
-	sourceBucket string
-	targetBucket string
-	throttler    *Throttler
-	storageClass string
-	progress     *Progress
+	workers        int
+	src            copyAPI
+	tgt            copyAPI
+	sourceBucket   string
+	targetBucket   string
+	throttler      *Throttler
+	storageClass   string
+	progress       *Progress
+	replicateAttrs bool
 }
 
 // copyAPI is the subset of the S3 API the copy and delete paths use.
@@ -47,13 +48,13 @@ var errObjectVanished = errors.New("source object vanished")
 
 const maxCopyObjectSize = 5 << 30
 
-func NewWorkerPool(workers int, client *s3.Client, source, target string,
-	throttler *Throttler, storageClass string, progress *Progress) *WorkerPool {
+func NewWorkerPool(workers int, srcClient, tgtClient *s3.Client, source, target string,
+	throttler *Throttler, storageClass string, progress *Progress, replicateAttrs bool) *WorkerPool {
 	return &WorkerPool{
-		workers: workers, src: client, tgt: client,
+		workers: workers, src: srcClient, tgt: tgtClient,
 		sourceBucket: source, targetBucket: target,
 		throttler: throttler, storageClass: storageClass,
-		progress: progress,
+		progress: progress, replicateAttrs: replicateAttrs,
 	}
 }
 
@@ -74,10 +75,13 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 			defer wg.Done()
 			for a := range actions {
 				start := time.Now()
+				out := a
 				var err error
 				switch a.Type {
 				case ActionCopy:
-					err = wp.copyObject(ctx, a)
+					// copyObject returns the action enriched with the attribute
+					// outcome, which the cache writer needs.
+					out, err = wp.copyObject(ctx, a)
 				case ActionDelete:
 					err = wp.deleteObject(ctx, a)
 				}
@@ -88,7 +92,7 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 				} else {
 					slog.Info("worker done", "key", a.Key, "action", a.Type, "ms", time.Since(start).Milliseconds())
 				}
-				results <- result{action: a, err: err}
+				results <- result{action: out, err: err}
 				if wp.progress != nil && !errors.Is(err, errObjectVanished) {
 					wp.progress.Add(err != nil)
 				}
@@ -118,30 +122,104 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 	return succeeded, len(succeeded), failed
 }
 
-func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
+// copyObject moves one object and, when attribute replication is on, applies its
+// characteristics. It returns the action carrying the fingerprint to cache: an
+// empty AttrsHash means the attribute state is unknown (replication off, or a
+// partial application), never that it matches.
+func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	copySource := fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)
+	// HEAD the source, not the target: ContentLength (and the attributes worth
+	// replicating) lives on the source, and the differ has already decided this
+	// object needs copying. Probing the target here duplicated that decision and
+	// treated the 404 a brand-new key always produces as a retryable failure, so
+	// CopyObject was never issued for new objects.
+	headOut, err := wp.headSource(reqCtx, a.Key)
+	if err != nil {
+		return a, err
+	}
+	if headOut == nil {
+		slog.Debug("source object vanished", "key", a.Key)
+		return a, errObjectVanished
+	}
 
-	// HEAD the source, not the target: ContentLength (and, later, the attributes
-	// worth replicating) lives on the source, and the differ has already decided
-	// this object needs copying. Probing the target here duplicated that decision
-	// and treated the 404 a brand-new key always produces as a retryable failure,
-	// so CopyObject was never issued for new objects.
+	if size := aws.ToInt64(headOut.ContentLength); size > maxCopyObjectSize {
+		return a, fmt.Errorf("%w: key %q is %d bytes, limit %d", ErrObjectTooLarge, a.Key, size, int64(maxCopyObjectSize))
+	}
+
+	var attrs ObjectAttrs
+	if wp.replicateAttrs {
+		attrs = AttrsFromHead(headOut)
+		if attrs.RetainUntil != nil && !attrs.liveRetention(time.Now().UTC()) {
+			// Sending a past RetainUntilDate makes S3 reject the whole copy, and it
+			// protects nothing, so the lock fields are dropped for this object.
+			slog.Debug("source retention already expired, not replicating lock",
+				"key", a.Key, "retain_until", attrs.RetainUntil.UTC().Format(time.RFC3339))
+		}
+		// The fingerprint records the class the target will actually have, not the
+		// source's: with a pair override the source class is never applied, so
+		// hashing it would report drift the copy can never fix.
+		if wp.storageClass != "" {
+			attrs.StorageClass = types.StorageClass(wp.storageClass)
+		}
+	}
+
+	// No target-side ETag comparison: the differ already decided this object
+	// differs, and the target does not evaluate x-amz-copy-source-if-match, so a
+	// conditional copy would buy nothing.
+	copyOut, err := wp.copyBytes(reqCtx, a.Key, attrs)
+	if err != nil {
+		return a, err
+	}
+
+	if !wp.replicateAttrs {
+		return a, nil
+	}
+
+	// Tags cannot ride on CopyObject on this endpoint (x-amz-tagging is not
+	// applied), so they are read from the source and written to the target. HEAD
+	// could not see them, which is why AttrsFromHead leaves Tags nil and they are
+	// attached here before hashing.
+	tags, err := wp.sourceTags(reqCtx, a.Key)
+	if err != nil {
+		// The bytes are correct; only the characteristics are incomplete. Retrying
+		// the copy would re-copy bytes for no reason, so this is a pending state.
+		slog.Warn("read source tags", "key", a.Key, "error", err)
+		a.PendingAttrs = true
+		return a, nil
+	}
+	attrs.Tags = tags
+
+	var versionID *string
+	if copyOut != nil {
+		versionID = copyOut.VersionId
+	}
+	if err := wp.applyTags(reqCtx, a.Key, tags, versionID); err != nil {
+		slog.Warn("apply target tags", "key", a.Key, "error", err)
+		a.PendingAttrs = true
+		return a, nil
+	}
+
+	a.AttrsHash = attrs.Hash()
+	return a, nil
+}
+
+// headSource HEADs the source object. It returns (nil, nil) when the object is
+// gone: the differ listed this key moments ago, so a 404 now means the object
+// vanished mid-run. That is a skip, not a failure, and must not burn the retry
+// budget.
+func (wp *WorkerPool) headSource(ctx context.Context, key string) (*s3.HeadObjectOutput, error) {
 	var headOut *s3.HeadObjectOutput
 	vanished := false
-	err := retryS3(reqCtx, "HeadObject", func(c context.Context) error {
+	err := retryS3(ctx, "HeadObject", func(c context.Context) error {
 		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
 			return err
 		}
 		out, err := wp.src.HeadObject(c, &s3.HeadObjectInput{
-			Bucket: &wp.sourceBucket, Key: &a.Key,
+			Bucket: &wp.sourceBucket, Key: &key,
 		})
 		if err != nil {
-			// The differ listed this key moments ago; if it is gone now the source
-			// object vanished mid-run. That is a skip, not a failure, so it must not
-			// reach the retry budget or the failed count.
 			if isNotFound(err, "NotFound", "NoSuchKey") {
 				vanished = true
 				return nil
@@ -152,33 +230,83 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 		return nil
 	}, 3)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if vanished {
-		slog.Debug("source object vanished", "key", a.Key)
-		return errObjectVanished
+		return nil, nil
 	}
+	return headOut, nil
+}
 
-	if size := aws.ToInt64(headOut.ContentLength); size > maxCopyObjectSize {
-		return fmt.Errorf("%w: key %q is %d bytes, limit %d", ErrObjectTooLarge, a.Key, size, int64(maxCopyObjectSize))
-	}
-
-	// No target-side ETag comparison: the differ already decided this object
-	// differs, and the target does not evaluate x-amz-copy-source-if-match, so a
-	// conditional copy would buy nothing.
-	return retryS3(reqCtx, "CopyObject", func(c context.Context) error {
+// copyBytes issues the CopyObject that moves the bytes. With attribute
+// replication off it builds exactly the legacy request.
+func (wp *WorkerPool) copyBytes(ctx context.Context, key string, attrs ObjectAttrs) (*s3.CopyObjectOutput, error) {
+	copySource := fmt.Sprintf("%s/%s", wp.sourceBucket, key)
+	var copyOut *s3.CopyObjectOutput
+	err := retryS3(ctx, "CopyObject", func(c context.Context) error {
 		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
 			return err
 		}
-		output := &s3.CopyObjectInput{
-			Bucket:     &wp.targetBucket,
-			CopySource: &copySource,
-			Key:        &a.Key,
+		out, err := wp.tgt.CopyObject(c, wp.copyRequest(key, copySource, attrs))
+		copyOut = out
+		return err
+	}, 3)
+	if err != nil {
+		return nil, err
+	}
+	return copyOut, nil
+}
+
+func (wp *WorkerPool) copyRequest(key, copySource string, attrs ObjectAttrs) *s3.CopyObjectInput {
+	if wp.replicateAttrs {
+		return attrs.copyInput(wp.targetBucket, key, copySource, wp.storageClass)
+	}
+	in := &s3.CopyObjectInput{
+		Bucket:     &wp.targetBucket,
+		CopySource: &copySource,
+		Key:        &key,
+	}
+	if wp.storageClass != "" {
+		in.StorageClass = types.StorageClass(wp.storageClass)
+	}
+	return in
+}
+
+// sourceTags reads the source object's tags. The call is a source read, so it is
+// charged to the get-op budget like the HEAD and the copy.
+func (wp *WorkerPool) sourceTags(ctx context.Context, key string) ([]types.Tag, error) {
+	var tags []types.Tag
+	err := retryS3(ctx, "GetObjectTagging", func(c context.Context) error {
+		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+			return err
 		}
-		if wp.storageClass != "" {
-			output.StorageClass = types.StorageClass(wp.storageClass)
+		out, err := wp.src.GetObjectTagging(c, &s3.GetObjectTaggingInput{
+			Bucket: &wp.sourceBucket, Key: &key,
+		})
+		if err != nil {
+			return err
 		}
-		_, err := wp.tgt.CopyObject(c, output)
+		tags = out.TagSet
+		return nil
+	}, 3)
+	return tags, err
+}
+
+// applyTags writes the source's tags onto the version the copy just created.
+// An empty set is written too, so a source whose tags were all removed clears
+// the target's: the target's tags must equal the source's, not merely be a
+// superset of whatever an earlier write left behind.
+func (wp *WorkerPool) applyTags(ctx context.Context, key string, tags []types.Tag, versionID *string) error {
+	return retryS3(ctx, "PutObjectTagging", func(c context.Context) error {
+		in := &s3.PutObjectTaggingInput{
+			Bucket:  &wp.targetBucket,
+			Key:     &key,
+			Tagging: &types.Tagging{TagSet: tags},
+		}
+		if versionID != nil {
+			in.VersionId = versionID
+		}
+		_, err := wp.tgt.PutObjectTagging(c, in)
 		return err
 	}, 3)
 }
