@@ -113,7 +113,7 @@ func (s *Server) createSyncPair(c *gin.Context) {
 	}
 
 	warns, err := sync.ValidatePairOptions(&p, tgt.RetentionMode, tgt.RetentionDays,
-		in.AcceptCompliance, true, nil, time.Now().UTC())
+		in.AcceptCompliance, true, nil, false, time.Now().UTC())
 	if err != nil {
 		respondErrorCode(c, http.StatusUnprocessableEntity, "preflight_failed", err.Error())
 		return
@@ -312,6 +312,7 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 	// Captured before apply so the earlier-date confirmation compares against the
 	// stored value; apply reassigns the field rather than writing through it.
 	previousExpireAt := p.TargetExpireAt
+	replicationWasOff := !p.ReplicateAttributes
 	lockFieldPresent, err := in.apply(p)
 	if err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
@@ -333,7 +334,7 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 	acceptCompliance := in.AcceptCompliance != nil && *in.AcceptCompliance
 	confirmEarlier := in.ConfirmExpireEarlier != nil && *in.ConfirmExpireEarlier
 	warns, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
-		acceptCompliance, confirmEarlier, previousExpireAt, time.Now().UTC())
+		acceptCompliance, confirmEarlier, previousExpireAt, replicationWasOff, time.Now().UTC())
 	if err != nil {
 		respondErrorCode(c, http.StatusUnprocessableEntity, "preflight_failed", err.Error())
 		return
@@ -353,7 +354,35 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// The engine holds a snapshot of the pair taken when it was created and reads
+	// replicate_attributes, attrs_reconcile_interval and target_expire_at from it
+	// at run time. Without this, every one of those edits is inert until the
+	// process restarts — worst of all an expiry moved into the future, which is
+	// the documented recovery from an expired pair: the update would report
+	// success while the engine kept refusing every run as expired.
+	s.restartEngineLoop(p)
+
 	c.JSON(http.StatusOK, apiResponse{Data: p, Warnings: warns})
+}
+
+// restartEngineLoop replaces a running engine with one built from the current
+// pair row. It is a no-op when no engine is running, so a disabled or not-yet-
+// started pair is unaffected.
+func (s *Server) restartEngineLoop(p *config.SyncPair) {
+	if !s.HasEngine(p.ID) {
+		return
+	}
+	if eng, ok := s.GetEngine(p.ID); ok {
+		eng.Stop()
+		s.DeleteEngine(p.ID)
+	}
+	if !p.Enabled {
+		return
+	}
+	if err := s.StartEngineLoop(s.rootCtx, *p); err != nil {
+		slog.Error("restartEngineLoop", "pair", p.ID, "error", err)
+	}
 }
 
 // parseExpireAt accepts an empty string (meaning "no expiry"), an RFC3339
@@ -552,7 +581,7 @@ func (s *Server) setup(c *gin.Context) {
 			return fmt.Errorf("get target bucket: %w", err)
 		}
 		if _, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
-			acceptCompliance, true, nil, time.Now().UTC()); err != nil {
+			acceptCompliance, true, nil, false, time.Now().UTC()); err != nil {
 			return err
 		}
 		// Recreating destroys the target bucket, so it needs the operator to

@@ -36,10 +36,13 @@ type AdvisoryWarning struct {
 // the pair's: they live on config.Bucket, and the retention-past-expiry warning
 // is about the bucket's default outliving the pair's expiry. retentionMode is
 // empty when the bucket has no default. previousExpireAt is the pair's current
-// TargetExpireAt, nil for a new pair. now may be zero, in which case the wall
-// clock is used.
+// TargetExpireAt, nil for a new pair. replicationWasOff reports that this call
+// is turning replicate_attributes on, which is what makes the backfill advisory
+// fire; callers with no previous value pass false. now may be zero, in which
+// case the wall clock is used.
 func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int,
-	acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error) {
+	acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time,
+	replicationWasOff bool, now time.Time) ([]AdvisoryWarning, error) {
 
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -68,12 +71,13 @@ func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionD
 		}
 	}
 
-	return advisoryWarnings(pair, retentionMode, retentionDays, previousExpireAt, now), nil
+	return advisoryWarnings(pair, retentionMode, retentionDays, previousExpireAt, replicationWasOff, now), nil
 }
 
 // advisoryWarnings computes the non-blocking notices, in a stable order so the
 // CLI prints them predictably.
-func advisoryWarnings(pair *config.SyncPair, retentionMode string, retentionDays int, previousExpireAt *time.Time, now time.Time) []AdvisoryWarning {
+func advisoryWarnings(pair *config.SyncPair, retentionMode string, retentionDays int,
+	previousExpireAt *time.Time, replicationWasOff bool, now time.Time) []AdvisoryWarning {
 	var warns []AdvisoryWarning
 
 	// Lock without a noncurrent-version rule means every overwrite keeps an
@@ -112,6 +116,33 @@ func advisoryWarnings(pair *config.SyncPair, retentionMode string, retentionDays
 			Message: "the target expiry date was cleared, but the existing s3sync-expire lifecycle " +
 				"rule is NOT removed by this change: it expires every object in the target bucket. " +
 				"Clear it on the bucket manually if that is not what you want",
+		})
+	}
+
+	// The lifecycle configuration is rewritten wholesale from the pair's own
+	// fields. A pair with a noncurrent rule but no expiry therefore PUTs a config
+	// that contains only s3sync-noncurrent, silently dropping a foreign
+	// s3sync-expire rule that was written when the pair still had a date. The
+	// previous config is logged at warn, but nothing else tells the operator.
+	if pair.NoncurrentExpireDays > 0 && pair.TargetExpireAt == nil {
+		warns = append(warns, AdvisoryWarning{
+			Code: "expire-rule-dropped",
+			Message: "this pair writes only the noncurrent-version lifecycle rule, so any " +
+				"s3sync-expire rule left on the target bucket from an earlier expiry date is " +
+				"removed: the target will no longer expire its objects on that date",
+		})
+	}
+
+	// Objects cached before replication was enabled carry no attribute
+	// fingerprint, and the sweep deliberately treats an empty fingerprint as
+	// "unknown" rather than "drifted". Nothing backfills them, so their
+	// characteristics only reach the target when their bytes change.
+	if pair.ReplicateAttributes && replicationWasOff {
+		warns = append(warns, AdvisoryWarning{
+			Code: "attrs-not-backfilled",
+			Message: "objects already synced before attribute replication was enabled will not " +
+				"have their characteristics copied unless their bytes change; run " +
+				"`pair reset` to force a full re-copy if you need them backfilled",
 		})
 	}
 

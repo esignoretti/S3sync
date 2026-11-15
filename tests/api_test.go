@@ -2,12 +2,14 @@
 package tests
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/esignoretti/S3sync/internal/api"
 	"github.com/esignoretti/S3sync/internal/config"
@@ -251,5 +253,94 @@ func TestCreatePairRejectsPastExpiry(t *testing.T) {
 		if p.Name == "expired-pair" {
 			t.Fatalf("rejected pair was persisted: %+v", p)
 		}
+	}
+}
+
+// An engine is built from a snapshot of the pair and reads target_expire_at,
+// replicate_attributes and attrs_reconcile_interval from that snapshot on every
+// run. A successful update therefore has to replace the running engine, or the
+// documented recovery from an expired pair (moving the date into the future)
+// reports success while the engine keeps refusing every run.
+func TestUpdatePairRestartsRunningEngine(t *testing.T) {
+	// A file DB, not :memory:: the engine loop runs on its own goroutine and
+	// needs to see the same schema as the request handler.
+	db, err := config.Open(filepath.Join(t.TempDir(), "config.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	endpoint := fakeTargetS3()
+	defer endpoint.Close()
+
+	repo := config.NewRepository(db)
+	srv, err := api.NewServer(repo, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := srv.Router()
+
+	for _, name := range []string{"src", "tgt"} {
+		b := &config.Bucket{
+			Name: name, Endpoint: endpoint.URL, Region: "us-east-1",
+			AccessKey: "ak", SecretKey: "sk", BucketName: "b",
+		}
+		if err := repo.CreateBucket(b); err != nil {
+			t.Fatalf("create bucket %s: %v", name, err)
+		}
+	}
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	pair := &config.SyncPair{
+		Name: "rearm", SourceBucketID: "", TargetBucketID: "",
+		SyncInterval: 3600, WorkerCount: 1, Enabled: true, TargetExpireAt: &past,
+	}
+	var listResp struct {
+		Data []config.Bucket `json:"data"`
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/buckets", nil))
+	json.NewDecoder(w.Body).Decode(&listResp)
+	if len(listResp.Data) < 2 {
+		t.Fatal("need 2 buckets")
+	}
+	pair.SourceBucketID = listResp.Data[0].ID
+	pair.TargetBucketID = listResp.Data[1].ID
+	if err := repo.CreateSyncPair(pair); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start an engine for the pair, as `serve` does at boot.
+	if err := srv.StartEngineLoop(context.Background(), *pair); err != nil {
+		t.Fatalf("start engine: %v", err)
+	}
+	before, ok := srv.GetEngine(pair.ID)
+	if !ok {
+		t.Fatal("no engine registered after StartEngineLoop")
+	}
+
+	// Move the expiry into the future through the API.
+	body := `{"target_expire_at":"2027-06-01T00:00:00Z"}`
+	w = httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/api/sync-pairs/"+pair.ID, jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("update status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	after, ok := srv.GetEngine(pair.ID)
+	if !ok {
+		t.Fatal("update left no engine registered")
+	}
+	if after == before {
+		t.Error("the engine was not replaced: it still holds the pre-update pair, " +
+			"so the new expiry will not take effect until the process restarts")
+	}
+	stored, err := repo.GetSyncPair(pair.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.TargetExpireAt == nil || !stored.TargetExpireAt.After(time.Now()) {
+		t.Fatalf("stored expiry = %v, want a future date", stored.TargetExpireAt)
 	}
 }

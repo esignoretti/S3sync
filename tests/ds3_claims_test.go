@@ -202,8 +202,10 @@ func TestDS3Claim_ContentLanguageAndExpiresNotStored(t *testing.T) {
 	client, bucket := ds3Bucket(t, false)
 	ctx := context.Background()
 
+	expires := time.Now().UTC().AddDate(2, 0, 0)
 	putObject(t, client, bucket, "lang", "body", func(in *s3.PutObjectInput) {
 		in.ContentLanguage = aws.String("en-GB")
+		in.Expires = aws.Time(expires)
 	})
 	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket), Key: aws.String("lang"),
@@ -211,9 +213,20 @@ func TestDS3Claim_ContentLanguageAndExpiresNotStored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("head: %v", err)
 	}
-	if head.ContentLanguage == nil || *head.ContentLanguage != "en-GB" {
-		t.Logf("NOTE: Content-Language is now stored (%v). Replication of it "+
-			"may be worth re-adding to attrs.go.", head.ContentLanguage)
+
+	switch {
+	case head.ContentLanguage == nil:
+		t.Logf("confirmed: Content-Language not stored (nil) — correctly excluded from replication")
+	case *head.ContentLanguage == "en-GB":
+		t.Logf("NOTE: Content-Language IS stored (%q). It could be added to attrs.go.", *head.ContentLanguage)
+	default:
+		t.Logf("Content-Language stored but altered: %q", *head.ContentLanguage)
+	}
+
+	if head.Expires == nil {
+		t.Logf("confirmed: Expires not stored (nil) — correctly excluded from replication")
+	} else {
+		t.Logf("NOTE: Expires IS stored (%s). It could be added to attrs.go.", head.Expires.Format(time.RFC3339))
 	}
 }
 

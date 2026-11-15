@@ -990,7 +990,7 @@ git commit -m "feat(sync): expired-pair guard, pending-attrs counter, provisioni
 
 **Interfaces:**
 - Consumes: `ProvisionTarget` (Task 3), `ValidateExpireAt` (Task 2), `config.SyncPair` fields (Task 1).
-- Produces: `func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error` in `internal/sync/run.go`; `func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)` and `type AdvisoryWarning struct { Code, Message string }` in `internal/sync/validate.go`.
+- Produces: `func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error` in `internal/sync/run.go`; `func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, replicationWasOff bool, now time.Time) ([]AdvisoryWarning, error)` and `type AdvisoryWarning struct { Code, Message string }` in `internal/sync/validate.go`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1002,7 +1002,7 @@ func TestValidatePairOptions(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
 	t.Run("compliance needs explicit acceptance", func(t *testing.T) {
-		_, err := ValidatePairOptions(&config.SyncPair{}, "COMPLIANCE", 0, false, false, nil, now)
+		_, err := ValidatePairOptions(&config.SyncPair{}, "COMPLIANCE", 0, false, false, nil, false, now)
 		if !errors.Is(err, ErrComplianceNeedsConfirm) {
 			t.Fatalf("err = %v", err)
 		}
@@ -1010,7 +1010,7 @@ func TestValidatePairOptions(t *testing.T) {
 
 	t.Run("past expiry rejected", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &past}
-		_, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, now)
+		_, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, false, now)
 		if !errors.Is(err, ErrExpireInPast) {
 			t.Fatalf("err = %v", err)
 		}
@@ -1018,25 +1018,25 @@ func TestValidatePairOptions(t *testing.T) {
 
 	t.Run("moving expiry earlier needs confirmation", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &earlier}
-		_, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &later, now)
+		_, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &later, false, now)
 		if !errors.Is(err, ErrExpireEarlierNeedsConfirm) {
 			t.Fatalf("err = %v", err)
 		}
-		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, &later, now); err != nil {
+		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, &later, false, now); err != nil {
 			t.Fatalf("with confirmation: %v", err)
 		}
 	})
 
 	t.Run("moving expiry later needs no confirmation", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &later}
-		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &earlier, now); err != nil {
+		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &earlier, false, now); err != nil {
 			t.Fatalf("err = %v", err)
 		}
 	})
 
 	t.Run("noncurrent days without newer versions is allowed", func(t *testing.T) {
 		p := &config.SyncPair{NoncurrentExpireDays: 5}
-		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, now); err != nil {
+		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, false, now); err != nil {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -1055,40 +1055,42 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 
 	t.Run("noncurrent recommended when lock is required without noncurrent expiry", func(t *testing.T) {
 		p := &config.SyncPair{RequireObjectLock: true, TargetExpireAt: &expire}
-		warns, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, now)
+		warns, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, false, now)
 		if err != nil { t.Fatalf("err = %v", err) }
 		if !hasCode(warns, "noncurrent-recommended") { t.Fatalf("warnings = %v", warns) }
 	})
 
 	t.Run("no noncurrent warning when noncurrent expiry is set", func(t *testing.T) {
 		p := &config.SyncPair{RequireObjectLock: true, TargetExpireAt: &expire, NoncurrentExpireDays: 30}
-		warns, _ := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, now)
+		warns, _ := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, false, now)
 		if hasCode(warns, "noncurrent-recommended") { t.Fatalf("warnings = %v", warns) }
 	})
 
 	t.Run("retention past expiry warns", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &expire}
-		warns, err := ValidatePairOptions(p, "COMPLIANCE", 200, true, false, nil, now)
+		warns, err := ValidatePairOptions(p, "COMPLIANCE", 200, true, false, nil, false, now)
 		if err != nil { t.Fatalf("err = %v", err) }
 		if !hasCode(warns, "retention-past-expiry") { t.Fatalf("warnings = %v", warns) }
 	})
 
 	t.Run("clearing an expiry warns that the lifecycle rule survives", func(t *testing.T) {
 		p := &config.SyncPair{}
-		warns, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &expire, now)
+		warns, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &expire, false, now)
 		if err != nil { t.Fatalf("err = %v", err) }
 		if !hasCode(warns, "expiry-cleared") { t.Fatalf("warnings = %v", warns) }
 	})
 }
 ```
 
-Also a test for the compliance rule: `ValidatePairOptions` takes a `retentionMode string` parameter; `"COMPLIANCE"` with `acceptCompliance == false` returns `ErrComplianceNeedsConfirm`. Adjust the signature to `ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)`.
+Also a test for the compliance rule: `ValidatePairOptions` takes a `retentionMode string` parameter; `"COMPLIANCE"` with `acceptCompliance == false` returns `ErrComplianceNeedsConfirm`. Adjust the signature to `ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, replicationWasOff bool, now time.Time) ([]AdvisoryWarning, error)`. `retentionDays` and `replicationWasOff` were added by controller ruling: retention defaults live on `config.Bucket`, not `config.SyncPair`, and the backfill advisory needs the previous value of `ReplicateAttributes`, which only an update path has.
 
-**Advisory warnings (spec §7.2), added by controller ruling during Task 3 review.** `ValidatePairOptions` also returns `[]AdvisoryWarning` with three codes, none of which are errors and none of which block pair creation:
+**Advisory warnings (spec §7.2), added by controller ruling during Task 3 review.** `ValidatePairOptions` also returns `[]AdvisoryWarning` with five codes, none of which are errors and none of which block pair creation:
 
 - `noncurrent-recommended` — `RequireObjectLock` is set but `NoncurrentExpireDays == 0`, so versioning-plus-lock accumulates noncurrent versions with no expiry signal.
 - `retention-past-expiry` — the bucket's default retention applied today would outlast `TargetExpireAt` (`retentionMode != ""`, `RetentionDays > 0`, `now + RetentionDays*24h > *TargetExpireAt`). The message must say the retention will outlive the expiry and that lifecycle deletion skips locked versions rather than deleting them.
 - `expiry-cleared` — `previousExpireAt != nil && pair.TargetExpireAt == nil`. The message must say the existing `s3sync-expire` lifecycle rule is NOT removed by this change (an empty rule set is skipped rather than written, because an empty `Rules` list is rejected as `MalformedXML`) and that the user must clear it on the bucket manually.
+- `expire-rule-dropped` — `NoncurrentExpireDays > 0 && pair.TargetExpireAt == nil`. Added during whole-branch review: the lifecycle configuration is rewritten wholesale from the pair's fields, so a noncurrent-only pair PUTs a config containing only `s3sync-noncurrent` and silently removes any `s3sync-expire` rule left from an earlier date. The previous config is logged at warn, but that is not visible to an operator.
+- `attrs-not-backfilled` — `pair.ReplicateAttributes && replicationWasOff`. Added during whole-branch review: objects cached before replication was enabled keep an empty `attrs_hash`, which the sweep deliberately treats as "unknown, never drift", so nothing ever backfills their characteristics. The message must name `pair reset` as the remedy.
 
 Both CLI commands print every warning to stderr as `warning: <message>` before proceeding. `now` is a parameter for determinism; when zero, use `time.Now().UTC()`. See the task brief for the exact test table.
 

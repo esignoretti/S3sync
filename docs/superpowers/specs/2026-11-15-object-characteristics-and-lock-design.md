@@ -198,6 +198,8 @@ Once lifecycle expires objects at the target, the source still has them. The cac
 
 Design: the engine refuses to run when `now > target_expire_at`, sets pair status `expired`, and the UI/CLI show it as terminal rather than an error. Recovery is `pair update --target-expire-at <future date>`: moving the date forward (or back into the future) re-arms the pair, and the next cycle re-copies anything lifecycle already deleted because the target `HeadObject` now returns 404. This makes the expiry a real end-of-life for the pair, which is the only coherent reading of "the target expires on date D".
 
+**The recovery only works if the update reaches the running engine.** An `Engine` is built from a snapshot of the pair and reads `TargetExpireAt` from it on every run, so a bare database write would report success while the engine kept refusing every cycle as expired — the one staleness a restart does not fix by waiting. `updateSyncPair` therefore replaces the running engine (`Server.restartEngineLoop`) after a successful write. The same mechanism is what makes `replicate_attributes`, `attrs_reconcile_interval` and the noncurrent rules take effect without a restart.
+
 ## 8. Detection and Reconciliation
 
 ### 8.1 What triggers an attribute write

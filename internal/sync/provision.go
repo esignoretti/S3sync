@@ -113,8 +113,11 @@ func ProvisionTarget(ctx context.Context, api targetAPI, srcRegion string, tgt *
 func bucketExists(ctx context.Context, api targetAPI, bucket string) (bool, error) {
 	_, err := api.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
 	if err != nil {
-		var nf *s3types.NotFound
-		if errors.As(err, &nf) {
+		// Shared with the lifecycle checks: this endpoint answers a missing
+		// bucket with a bare 404 as often as with a modelled NotFound, and the
+		// provisioning step now fails the whole run, so a 404 that is not
+		// recognised here would stop a pair from ever creating its bucket.
+		if isNotFound(err, "NotFound", "NoSuchBucket") {
 			return false, nil
 		}
 		return false, err

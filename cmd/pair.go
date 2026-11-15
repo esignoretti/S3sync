@@ -52,7 +52,7 @@ var pairAddCmd = &cobra.Command{
 
 		acceptCompliance, _ := cmd.Flags().GetBool("accept-compliance")
 		warns, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
-			acceptCompliance, true, nil, time.Now().UTC())
+			acceptCompliance, true, nil, false, time.Now().UTC())
 		if err != nil {
 			return err
 		}
@@ -190,6 +190,7 @@ var pairUpdateCmd = &cobra.Command{
 		}
 
 		previousExpireAt := p.TargetExpireAt
+		replicationWasOff := !p.ReplicateAttributes
 		if err := applyPairFlags(cmd, p, false); err != nil {
 			return err
 		}
@@ -201,7 +202,7 @@ var pairUpdateCmd = &cobra.Command{
 		acceptCompliance, _ := cmd.Flags().GetBool("accept-compliance")
 		confirmEarlier, _ := cmd.Flags().GetBool("confirm-expire-earlier")
 		warns, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
-			acceptCompliance, confirmEarlier, previousExpireAt, time.Now().UTC())
+			acceptCompliance, confirmEarlier, previousExpireAt, replicationWasOff, time.Now().UTC())
 		if err != nil {
 			return err
 		}

@@ -46,6 +46,12 @@
             <label>Expire target on (empty = no expiry)
                 <input type="date" id="edit-target-expire-at">
             </label>
+            <label>Delete noncurrent versions after (days, 0 = off)
+                <input type="number" id="edit-noncurrent-expire-days" min="0" step="1">
+            </label>
+            <label>Keep newest noncurrent versions (0 = all)
+                <input type="number" id="edit-newer-noncurrent-versions" min="0" step="1">
+            </label>
             <label class="checkbox-label"><input type="checkbox" id="edit-accept-compliance"> Accept COMPLIANCE retention (cannot be shortened or bypassed)</label>
             <div class="modal-actions">
                 <button class="btn btn-sm btn-secondary" onclick="closeEditModal()">Cancel</button>

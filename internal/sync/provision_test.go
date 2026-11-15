@@ -482,3 +482,20 @@ func TestProvisionTargetLockMissingMessages(t *testing.T) {
 		})
 	}
 }
+
+// HeadBucket answering a bare 404 means "no such bucket", exactly as it does for
+// GetBucketLifecycleConfiguration. Provisioning runs inside setupOnce and fails
+// the run, so a 404 that is not recognised here would stop a pair from ever
+// creating its bucket — every cycle, not just once.
+func TestProvisionTargetBare404OnHeadBucketCreatesIt(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	fake := &fakeTarget{headErr: smithyStatusError(http.StatusNotFound)}
+
+	if err := ProvisionTarget(context.Background(), fake, "us-east-1",
+		&config.Bucket{BucketName: "b"}, &config.SyncPair{}, ProvisionOptions{Now: now}); err != nil {
+		t.Fatalf("a bare 404 on HeadBucket must mean the bucket is absent, got %v", err)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"HeadBucket", "CreateBucket"}) {
+		t.Fatalf("calls = %v, want the bucket to be created", fake.calls)
+	}
+}

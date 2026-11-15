@@ -437,6 +437,23 @@ func (e *Engine) LastResult() (succeeded, failed int) {
 	return e.lastSucceeded, e.lastFailed
 }
 
+// SyncProvisionState copies the provisioning and sweep state the engine holds on
+// its private pair onto dst. The engine never persists anything itself, and the
+// caller that does (RunOneShot, afterSync) re-reads a fresh pair from the
+// repository, so without this the provisioned_at / provision_error /
+// last_reconcile_at columns are never written.
+func (e *Engine) SyncProvisionState(dst *config.SyncPair) error {
+	if dst == nil {
+		return errors.New("nil pair")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	dst.ProvisionedAt = e.pair.ProvisionedAt
+	dst.ProvisionError = e.pair.ProvisionError
+	dst.LastReconcileAt = e.pair.LastReconcileAt
+	return nil
+}
+
 func ptr[T any](v T) *T {
 	return &v
 }

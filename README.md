@@ -267,6 +267,8 @@ By default a pair copies bytes and the storage class. With `--replicate-attribut
 
 **Drift sweep.** `--attrs-reconcile-interval <seconds>` (default off) periodically re-reads each source object's attributes and re-copies any whose fingerprint no longer matches the cache. This is what catches tag-only edits on objects whose bytes never changed. It costs one HEAD plus one tag read per cached object per sweep, throttled against `max_get_ops_per_minute`.
 
+**Enabling it later does not backfill.** Objects already cached before `--replicate-attributes` was turned on have no fingerprint, and the sweep deliberately treats a missing fingerprint as "unknown" rather than "drifted" — otherwise every pre-existing object would be re-copied on the first sweep. Their characteristics therefore only reach the target when their bytes next change. Run `s3sync pair reset <id>` to clear the cache and force a full re-copy if you need them backfilled; `pair update` prints a warning saying so.
+
 ## Object Lock and Target Expiry
 
 **Object lock** can only be enabled when a bucket is created — never afterwards. Because a pair creates its target on first sync, lock is a pair-creation decision:
@@ -298,6 +300,8 @@ Creation and update return non-blocking warnings rather than failing:
 | `noncurrent-recommended` | Object lock is on but `--noncurrent-expire-days` is unset, so old versions accumulate forever |
 | `retention-past-expiry` | The bucket's default retention outlasts `--target-expire-at`; lifecycle deletion skips still-locked versions |
 | `expiry-cleared` | The pair no longer has an expiry but the old lifecycle rule is still on the bucket |
+| `expire-rule-dropped` | The pair writes only the noncurrent rule, so any `s3sync-expire` rule from an earlier date is removed |
+| `attrs-not-backfilled` | Replication was just enabled; already-synced objects keep their old characteristics until their bytes change |
 
 `--accept-compliance` is required to use a `COMPLIANCE` retention mode, which cannot be undone even by the account root.
 

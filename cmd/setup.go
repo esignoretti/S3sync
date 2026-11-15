@@ -34,7 +34,7 @@ with interactive prompts. Run this on a fresh install to get started.`,
 				return fmt.Errorf("get target bucket: %w", err)
 			}
 			warns, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
-				false, true, nil, time.Now().UTC())
+				false, true, nil, false, time.Now().UTC())
 			if err != nil {
 				return err
 			}

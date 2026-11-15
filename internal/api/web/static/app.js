@@ -185,6 +185,8 @@ async function pollStatus() {
             editBtn.dataset.replicateAttributes = p.replicate_attributes || false;
             editBtn.dataset.attrsReconcileInterval = p.attrs_reconcile_interval || 0;
             editBtn.dataset.targetExpireAt = p.target_expire_at ? p.target_expire_at.slice(0, 10) : '';
+            editBtn.dataset.noncurrentExpireDays = p.noncurrent_expire_days || 0;
+            editBtn.dataset.newerNoncurrentVersions = p.newer_noncurrent_versions || 0;
             editBtn.dataset.targetBucket = p.target_bucket || '';
             editBtn.addEventListener('click', () => openEditModal(editBtn.dataset));
 
@@ -298,6 +300,8 @@ function openEditModal(d) {
     document.getElementById('edit-replicate-attributes').checked = d.replicateAttributes === 'true';
     document.getElementById('edit-attrs-reconcile-interval').value = d.attrsReconcileInterval || '';
     document.getElementById('edit-target-expire-at').value = d.targetExpireAt || '';
+    document.getElementById('edit-noncurrent-expire-days').value = d.noncurrentExpireDays || '';
+    document.getElementById('edit-newer-noncurrent-versions').value = d.newerNoncurrentVersions || '';
     document.getElementById('edit-accept-compliance').checked = false;
     document.getElementById('edit-modal').style.display = 'flex';
 }
@@ -315,6 +319,8 @@ async function saveEdit() {
     let replicateAttributes = document.getElementById('edit-replicate-attributes').checked;
     let attrsInterval = parseInt(document.getElementById('edit-attrs-reconcile-interval').value);
     let expireAt = document.getElementById('edit-target-expire-at').value;
+    let noncurrentDays = parseInt(document.getElementById('edit-noncurrent-expire-days').value);
+    let newerVersions = parseInt(document.getElementById('edit-newer-noncurrent-versions').value);
     let acceptCompliance = document.getElementById('edit-accept-compliance').checked;
 
     // Moving the expiry earlier deletes data sooner than promised, so it takes an
@@ -335,6 +341,8 @@ async function saveEdit() {
     body.accept_compliance = acceptCompliance;
     body.confirm_expire_earlier = confirmEarlier;
     body.target_expire_at = expireAt;
+    if (!isNaN(noncurrentDays)) body.noncurrent_expire_days = noncurrentDays;
+    if (!isNaN(newerVersions)) body.newer_noncurrent_versions = newerVersions;
     if (!isNaN(attrsInterval)) body.attrs_reconcile_interval = attrsInterval;
     if (!isNaN(interval)) body.sync_interval = interval;
     if (!isNaN(workers)) body.worker_count = workers;

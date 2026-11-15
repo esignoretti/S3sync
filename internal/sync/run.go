@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -67,6 +68,12 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	if err := engine.RunOnce(ctx); err != nil {
 		close(done)
 		<-progDone
+		// The engine has already decided a terminal status (expired, or error from
+		// a failed preflight). Persisting it here matters more on the error path
+		// than the success path: the pair list and the dashboard read the stored
+		// status, so returning without writing leaves a dead pair looking healthy
+		// until the next successful run — which for an expired pair never comes.
+		persistStatus(repo, pair, engine)
 		fmt.Fprintf(os.Stderr, "\nSync FAILED: %v\n", err)
 		return fmt.Errorf("sync: %w", err)
 	}
@@ -76,6 +83,17 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 
 	_, _, status, _, prog := engine.Status()
 	fmt.Fprintf(os.Stderr, "\r  objects: %d copied, %d failed  \n", prog.Completed, prog.Failed)
+	persistStatus(repo, pair, engine)
+
+	fmt.Printf("Sync complete for %q. Status: %s (duration: %s)\n", pair.Name, status, time.Since(start).Round(time.Second))
+	return nil
+}
+
+// persistStatus writes the engine's current status onto the pair. Failures are
+// logged rather than returned: the caller is already reporting the run's own
+// outcome, and losing the status write must not mask it.
+func persistStatus(repo *config.Repository, pair *config.SyncPair, engine *Engine) {
+	_, _, status, _, _ := engine.Status()
 	now := time.Now().UTC()
 	pair.LastSyncAt = &now
 	pair.LastSyncStatus = status
@@ -84,12 +102,17 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	} else {
 		pair.ConsecutiveErrors = 0
 	}
-	if err := repo.UpdateSyncPair(pair); err != nil {
-		return fmt.Errorf("update pair status: %w", err)
+	// Provisioning and the drift sweep both write to the engine's own copy of the
+	// pair, so their outcomes only reach the database through here. Without this
+	// the columns exist and never fill in: last_reconcile_at would be nil on every
+	// start (re-sweeping the whole cache each time) and provision_error could
+	// never hold a value at all.
+	if err := engine.SyncProvisionState(pair); err != nil {
+		slog.Warn("read engine provision state", "pair", pair.Name, "error", err)
 	}
-
-	fmt.Printf("Sync complete for %q. Status: %s (duration: %s)\n", pair.Name, status, time.Since(start).Round(time.Second))
-	return nil
+	if err := repo.UpdateSyncPair(pair); err != nil {
+		slog.Warn("failed to persist pair status", "pair", pair.Name, "error", err)
+	}
 }
 
 // ProvisionPair runs the target-bucket preflight for a pair that is about to be
