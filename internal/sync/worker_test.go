@@ -778,7 +778,7 @@ func TestApplyAttrs_VanishedSourceIsSkipped(t *testing.T) {
 }
 
 // With replication off there is nothing to apply, and the empty fingerprint
-// stops the differ and the sweep from asking again.
+// records "unknown".
 func TestApplyAttrs_WithoutAttrReplicationDoesNothing(t *testing.T) {
 	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{}}
 	wp := newTestWorkerPoolWithoutAttrs(api)
@@ -792,6 +792,31 @@ func TestApplyAttrs_WithoutAttrReplicationDoesNothing(t *testing.T) {
 	}
 	if got.AttrsHash != "" || got.PendingAttrs {
 		t.Fatalf("action = %+v, want no hash and not pending", got)
+	}
+}
+
+// A pending action that arrives while replication is off must come back with
+// PendingAttrs cleared. StreamingDiff keys on that flag alone and engine.go
+// writes it straight back to the cache, so leaving it set re-emits
+// ActionCopyAttributes for the key on every cycle, forever.
+func TestApplyAttrs_WithoutAttrReplicationClearsPending(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{}}
+	wp := newTestWorkerPoolWithoutAttrs(api)
+
+	got, err := wp.applyAttrs(context.Background(), SyncAction{
+		Type: ActionCopyAttributes, Key: "k", PendingAttrs: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PendingAttrs {
+		t.Fatal("PendingAttrs is still set; the differ would re-emit this action every cycle")
+	}
+	if got.AttrsHash != "" {
+		t.Fatalf("AttrsHash = %q, want empty: nothing was applied", got.AttrsHash)
+	}
+	if api.headCalls != 0 || api.getTags != 0 || api.putTags != 0 {
+		t.Fatalf("calls: %d head, %d get, %d put; want 0", api.headCalls, api.getTags, api.putTags)
 	}
 }
 

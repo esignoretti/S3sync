@@ -70,6 +70,14 @@ func (a ObjectAttrs) WithEffectiveStorageClass(sc string) ObjectAttrs {
 	return a
 }
 
+// withTags returns a copy of a with the source's tags attached. It is the one
+// place the input to Hash() is assembled, so the copy path, the attribute retry
+// and the drift sweep cannot fingerprint different states.
+func (a ObjectAttrs) withTags(tags []types.Tag) ObjectAttrs {
+	a.Tags = tags
+	return a
+}
+
 // Hash is a canonical fingerprint of the replicated characteristics. It is
 // stable across map iteration order and metadata key case, so the same object
 // state always yields the same value; an empty hash means "unknown" (an entry

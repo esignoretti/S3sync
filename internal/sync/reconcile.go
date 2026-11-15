@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -25,7 +26,7 @@ func ShouldReconcile(pair *config.SyncPair, now time.Time) bool {
 }
 
 // reconcileSweep finds objects whose characteristics drifted after their bytes
-// were copied, and emits ActionCopyAttributes for each.
+// were copied, and emits ActionCopy for each.
 //
 // This is the only detector for the drift that matters most: a tag, metadata or
 // retention change bumps neither the ETag nor LastModified, so StreamingDiff
@@ -34,12 +35,18 @@ func ShouldReconcile(pair *config.SyncPair, now time.Time) bool {
 // per sweep, both charged to the source get-op budget because both are source
 // GETs.
 //
+// A drift is repaired with ActionCopy, not ActionCopyAttributes: the server-side
+// copy carries every replicated characteristic in one request, so it can repair
+// metadata, content type, retention and storage-class drift alike. The
+// attribute-only action rewrites tags alone, so using it here would report a
+// repaired object whose other characteristics are still stale.
+//
 // Entries with an empty AttrsHash are skipped without a read: empty means
 // "unknown" (written before this feature existed), never "matches".
 func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) error {
 	entries, err := e.store.List(e.pair.ID)
 	if err != nil {
-		return err
+		return fmt.Errorf("list cache: %w", err)
 	}
 	if len(entries) == 0 {
 		return nil
@@ -68,15 +75,14 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 			continue
 		}
 
-		attrs := e.pool.effectiveAttrs(entry.Key, headOut)
-		tags, err := e.pool.sourceTags(ctx, entry.Key)
+		tags, err := e.pool.readTags(ctx, entry.Key)
 		if err != nil {
 			// The object is probably fine; the read was not. Emitting an action
 			// here would fabricate drift out of a transient failure.
 			slog.Warn("reconcile: read source tags", "key", entry.Key, "error", err)
 			continue
 		}
-		attrs.Tags = tags
+		attrs := e.pool.effectiveAttrs(entry.Key, headOut).withTags(tags)
 
 		if attrs.Hash() == entry.AttrsHash {
 			continue
@@ -85,7 +91,7 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 		slog.Info("reconcile: attributes drifted", "key", entry.Key)
 		select {
 		case actions <- SyncAction{
-			Type: ActionCopyAttributes, Key: entry.Key,
+			Type: ActionCopy, Key: entry.Key,
 			ETag: entry.ETag, Size: entry.Size,
 			LastModified: entry.LastModified,
 		}:

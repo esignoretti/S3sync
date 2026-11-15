@@ -188,14 +188,18 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction,
 // no CopyObject, no size check, and no VersionId, so the target's current
 // version is the one tagged.
 //
-// This is what a pending_attrs entry or a drifted fingerprint turns into, so the
-// two paths must fingerprint identically or the sweep re-emits the action every
-// cycle.
+// This is what a pending_attrs entry turns into, so the two paths must
+// fingerprint identically or the retry re-emits the action every cycle.
 func (wp *WorkerPool) applyAttrs(ctx context.Context, a SyncAction) (SyncAction, error) {
 	if !wp.replicateAttrs {
 		// Attribute replication is off, so nothing here is wanted on the target.
-		// The empty hash records "unknown", which stops the differ and the sweep
-		// from asking again.
+		// The empty hash records "unknown", which the sweep already skips.
+		//
+		// Clearing PendingAttrs is what stops the retry loop: StreamingDiff
+		// keys on that flag alone (differ.go, equal-key branch) and never looks
+		// at AttrsHash, so leaving it set re-emits this action every cycle while
+		// engine.go writes the flag straight back to the cache.
+		a.PendingAttrs = false
 		return a, nil
 	}
 
@@ -246,12 +250,12 @@ func (wp *WorkerPool) effectiveAttrs(key string, headOut *s3.HeadObjectOutput) O
 // not see them, which is why AttrsFromHead leaves Tags nil and they are attached
 // here before hashing.
 func (wp *WorkerPool) writeAttrs(ctx context.Context, key string, attrs ObjectAttrs, versionID *string) (ObjectAttrs, bool) {
-	tags, err := wp.sourceTags(ctx, key)
+	tags, err := wp.readTags(ctx, key)
 	if err != nil {
 		slog.Warn("read source tags", "key", key, "error", err)
 		return attrs, false
 	}
-	attrs.Tags = tags
+	attrs = attrs.withTags(tags)
 	if err := wp.applyTags(ctx, key, tags, versionID); err != nil {
 		slog.Warn("apply target tags", "key", key, "error", err)
 		return attrs, false
@@ -326,9 +330,11 @@ func (wp *WorkerPool) copyRequest(key, copySource string, attrs ObjectAttrs) *s3
 	return in
 }
 
-// sourceTags reads the source object's tags. The call is a source read, so it is
-// charged to the get-op budget like the HEAD and the copy.
-func (wp *WorkerPool) sourceTags(ctx context.Context, key string) ([]types.Tag, error) {
+// readTags reads the source object's tags. The call is a source read, so it is
+// charged to the get-op budget like the HEAD and the copy. It is separate from
+// writeAttrs because the drift sweep needs the tag component of the fingerprint
+// without writing anything to the target.
+func (wp *WorkerPool) readTags(ctx context.Context, key string) ([]types.Tag, error) {
 	var tags []types.Tag
 	err := retryS3(ctx, "GetObjectTagging", func(c context.Context) error {
 		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
