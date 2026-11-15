@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"text/tabwriter"
+	"time"
 
 	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/esignoretti/S3sync/internal/sync"
@@ -39,7 +40,30 @@ var pairAddCmd = &cobra.Command{
 			SyncInterval: interval, WorkerCount: workers,
 			MaxGetOpsPerMinute: maxOps, DeletePropagation: delProp,
 			TargetStorageClass: sc, Enabled: true,
+			OnLockMissing: "fail",
 		}
+		if err := applyPairFlags(cmd, p, true); err != nil {
+			return err
+		}
+		tgt, err := repo.GetBucket(tgtID)
+		if err != nil {
+			return fmt.Errorf("get target bucket: %w", err)
+		}
+
+		acceptCompliance, _ := cmd.Flags().GetBool("accept-compliance")
+		warns, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
+			acceptCompliance, true, nil, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		printWarnings(warns)
+
+		forceRecreate, _ := cmd.Flags().GetBool("force-recreate")
+		if err := sync.ProvisionPair(cmd.Context(), repo, p,
+			sync.ProvisionOptions{ForceRecreate: forceRecreate, Now: time.Now().UTC()}); err != nil {
+			return fmt.Errorf("provision target: %w", err)
+		}
+
 		if err := repo.CreateSyncPair(p); err != nil {
 			return fmt.Errorf("create pair: %w", err)
 		}
@@ -155,8 +179,98 @@ var pairUpdateCmd = &cobra.Command{
 			p.Enabled = v
 		}
 
+		// Lock can only be turned on at bucket creation, so these two are fixed
+		// for the life of the pair: changing them here would silently do nothing.
+		for _, f := range []string{"require-object-lock", "on-lock-missing"} {
+			if cmd.Flags().Changed(f) {
+				return fmt.Errorf("--%s cannot be changed after pair creation: "+
+					"object lock can only be enabled when a bucket is created; "+
+					"delete and recreate the pair against a new target bucket instead", f)
+			}
+		}
+
+		previousExpireAt := p.TargetExpireAt
+		if err := applyPairFlags(cmd, p, false); err != nil {
+			return err
+		}
+		tgt, err := repo.GetBucket(p.TargetBucketID)
+		if err != nil {
+			return fmt.Errorf("get target bucket: %w", err)
+		}
+
+		acceptCompliance, _ := cmd.Flags().GetBool("accept-compliance")
+		confirmEarlier, _ := cmd.Flags().GetBool("confirm-expire-earlier")
+		warns, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
+			acceptCompliance, confirmEarlier, previousExpireAt, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		printWarnings(warns)
+
+		if err := sync.ProvisionPair(cmd.Context(), repo, p,
+			sync.ProvisionOptions{ForceRecreate: true, Now: time.Now().UTC()}); err != nil {
+			return fmt.Errorf("provision target: %w", err)
+		}
+
 		return repo.UpdateSyncPair(p)
 	},
+}
+
+// applyPairFlags copies the pair options that are settable from the command line
+// onto p. create selects the add-time subset; the lock options are only accepted
+// on create because object lock cannot be enabled after a bucket exists.
+func applyPairFlags(cmd *cobra.Command, p *config.SyncPair, create bool) error {
+	if cmd.Flags().Changed("replicate-attributes") {
+		v, _ := cmd.Flags().GetBool("replicate-attributes")
+		p.ReplicateAttributes = v
+	}
+	if cmd.Flags().Changed("attrs-reconcile-interval") {
+		v, _ := cmd.Flags().GetInt("attrs-reconcile-interval")
+		p.AttrsReconcileInterval = v
+	}
+	if cmd.Flags().Changed("target-expire-at") {
+		raw, _ := cmd.Flags().GetString("target-expire-at")
+		if raw == "" {
+			p.TargetExpireAt = nil
+		} else {
+			t, err := time.Parse("2006-01-02", raw)
+			if err != nil {
+				return fmt.Errorf("--target-expire-at %q: want YYYY-MM-DD: %w", raw, err)
+			}
+			// Parse yields UTC for a bare date; ValidatePairOptions does the rest.
+			p.TargetExpireAt = &t
+		}
+	}
+	if create {
+		if cmd.Flags().Changed("noncurrent-expire-days") {
+			v, _ := cmd.Flags().GetInt("noncurrent-expire-days")
+			p.NoncurrentExpireDays = v
+		}
+		if cmd.Flags().Changed("newer-noncurrent-versions") {
+			v, _ := cmd.Flags().GetInt("newer-noncurrent-versions")
+			p.NewerNoncurrentVersions = v
+		}
+		if cmd.Flags().Changed("require-object-lock") {
+			v, _ := cmd.Flags().GetBool("require-object-lock")
+			p.RequireObjectLock = v
+		}
+		if cmd.Flags().Changed("on-lock-missing") {
+			v, _ := cmd.Flags().GetString("on-lock-missing")
+			if v != "fail" && v != "recreate" {
+				return fmt.Errorf("--on-lock-missing %q: want fail or recreate", v)
+			}
+			p.OnLockMissing = v
+		}
+	}
+	return nil
+}
+
+// printWarnings reports advisory warnings on stderr. They never block the
+// change, so they must not look like failures.
+func printWarnings(warns []sync.AdvisoryWarning) {
+	for _, w := range warns {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w.Message)
+	}
 }
 
 var pairDeleteCmd = &cobra.Command{
@@ -197,6 +311,15 @@ func init() {
 	pairAddCmd.Flags().Int("max-ops", 0, "Max GET ops per minute (0=unlimited)")
 	pairAddCmd.Flags().Bool("delete-propagation", true, "Propagate deletes")
 	pairAddCmd.Flags().String("storage-class", "", "Target storage class override")
+	pairAddCmd.Flags().Bool("replicate-attributes", false, "Replicate object metadata, tags, retention and legal hold")
+	pairAddCmd.Flags().String("target-expire-at", "", "Expire the target bucket's objects at this date (YYYY-MM-DD, midnight UTC)")
+	pairAddCmd.Flags().Int("noncurrent-expire-days", 0, "Delete noncurrent versions after this many days")
+	pairAddCmd.Flags().Int("newer-noncurrent-versions", 0, "Keep this many noncurrent versions regardless of age")
+	pairAddCmd.Flags().Bool("require-object-lock", false, "Require object lock on the target bucket")
+	pairAddCmd.Flags().String("on-lock-missing", "fail", "When the target bucket lacks object lock: fail or recreate")
+	pairAddCmd.Flags().Bool("force-recreate", false, "Allow recreating the target bucket when --on-lock-missing recreate needs it")
+	pairAddCmd.Flags().Bool("accept-compliance", false, "Accept COMPLIANCE retention, which cannot be shortened or bypassed")
+	pairAddCmd.Flags().Int("attrs-reconcile-interval", 0, "Seconds between attribute drift sweeps (0=off)")
 
 	pairUpdateCmd.Flags().String("name", "", "New name")
 	pairUpdateCmd.Flags().String("source-bucket", "", "New source bucket ID")
@@ -207,6 +330,13 @@ func init() {
 	pairUpdateCmd.Flags().Bool("delete-propagation", true, "Enable delete propagation")
 	pairUpdateCmd.Flags().String("storage-class", "", "New target storage class")
 	pairUpdateCmd.Flags().Bool("enabled", true, "Enable sync pair")
+	pairUpdateCmd.Flags().Bool("replicate-attributes", false, "Replicate object metadata, tags, retention and legal hold")
+	pairUpdateCmd.Flags().Int("attrs-reconcile-interval", 0, "Seconds between attribute drift sweeps (0=off)")
+	pairUpdateCmd.Flags().String("target-expire-at", "", "Expire the target bucket's objects at this date (YYYY-MM-DD); empty clears it")
+	pairUpdateCmd.Flags().Bool("confirm-expire-earlier", false, "Confirm moving the target expiry date earlier")
+	pairUpdateCmd.Flags().Bool("accept-compliance", false, "Accept COMPLIANCE retention, which cannot be shortened or bypassed")
+	pairUpdateCmd.Flags().Bool("require-object-lock", false, "Not settable after creation (rejected)")
+	pairUpdateCmd.Flags().String("on-lock-missing", "fail", "Not settable after creation (rejected)")
 
 	pairCmd.AddCommand(pairAddCmd, pairListCmd, pairGetCmd, pairUpdateCmd, pairDeleteCmd, pairSyncCmd)
 	rootCmd.AddCommand(pairCmd)

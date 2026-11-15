@@ -91,3 +91,37 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	fmt.Printf("Sync complete for %q. Status: %s (duration: %s)\n", pair.Name, status, time.Since(start).Round(time.Second))
 	return nil
 }
+
+// ProvisionPair runs the target-bucket preflight for a pair that is about to be
+// created or changed, outside any sync run.
+//
+// Pair creation calls it before writing the pair: a pair whose target cannot be
+// provisioned would otherwise be persisted and then fail every object on every
+// cycle, with the real cause buried in per-object errors.
+func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error {
+	tgt, err := repo.GetBucket(pair.TargetBucketID)
+	if err != nil {
+		return fmt.Errorf("get target bucket: %w", err)
+	}
+	src, err := repo.GetBucket(pair.SourceBucketID)
+	if err != nil {
+		return fmt.Errorf("get source bucket: %w", err)
+	}
+
+	tgtS3, err := s3client.NewClient(tgt)
+	if err != nil {
+		return fmt.Errorf("s3 target client: %w", err)
+	}
+
+	if opts.Now.IsZero() {
+		opts.Now = time.Now().UTC()
+	}
+	if err := ProvisionTarget(ctx, tgtS3, src.Region, tgt, pair, opts); err != nil {
+		pair.ProvisionError = err.Error()
+		return err
+	}
+	now := opts.Now.UTC()
+	pair.ProvisionedAt = &now
+	pair.ProvisionError = ""
+	return nil
+}

@@ -990,7 +990,7 @@ git commit -m "feat(sync): expired-pair guard, pending-attrs counter, provisioni
 
 **Interfaces:**
 - Consumes: `ProvisionTarget` (Task 3), `ValidateExpireAt` (Task 2), `config.SyncPair` fields (Task 1).
-- Produces: `func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error` in `internal/sync/run.go`; `func ValidatePairOptions(pair *config.SyncPair, retentionMode string, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)` and `type AdvisoryWarning struct { Code, Message string }` in `internal/sync/provision.go`.
+- Produces: `func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error` in `internal/sync/run.go`; `func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)` and `type AdvisoryWarning struct { Code, Message string }` in `internal/sync/provision.go`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1002,7 +1002,7 @@ func TestValidatePairOptions(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
 	t.Run("compliance needs explicit acceptance", func(t *testing.T) {
-		_, err := ValidatePairOptions(&config.SyncPair{}, "COMPLIANCE", false, false, nil, now)
+		_, err := ValidatePairOptions(&config.SyncPair{}, "COMPLIANCE", 0, false, false, nil, now)
 		if !errors.Is(err, ErrComplianceNeedsConfirm) {
 			t.Fatalf("err = %v", err)
 		}
@@ -1010,7 +1010,7 @@ func TestValidatePairOptions(t *testing.T) {
 
 	t.Run("past expiry rejected", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &past}
-		_, err := ValidatePairOptions(p, "GOVERNANCE", true, true, nil, now)
+		_, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, now)
 		if !errors.Is(err, ErrExpireInPast) {
 			t.Fatalf("err = %v", err)
 		}
@@ -1018,25 +1018,25 @@ func TestValidatePairOptions(t *testing.T) {
 
 	t.Run("moving expiry earlier needs confirmation", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &earlier}
-		_, err := ValidatePairOptions(p, "GOVERNANCE", true, false, &later, now)
+		_, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &later, now)
 		if !errors.Is(err, ErrExpireEarlierNeedsConfirm) {
 			t.Fatalf("err = %v", err)
 		}
-		if _, err := ValidatePairOptions(p, "GOVERNANCE", true, true, &later, now); err != nil {
+		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, &later, now); err != nil {
 			t.Fatalf("with confirmation: %v", err)
 		}
 	})
 
 	t.Run("moving expiry later needs no confirmation", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &later}
-		if _, err := ValidatePairOptions(p, "GOVERNANCE", true, false, &earlier, now); err != nil {
+		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &earlier, now); err != nil {
 			t.Fatalf("err = %v", err)
 		}
 	})
 
 	t.Run("noncurrent days without newer versions is allowed", func(t *testing.T) {
 		p := &config.SyncPair{NoncurrentExpireDays: 5}
-		if _, err := ValidatePairOptions(p, "GOVERNANCE", true, true, nil, now); err != nil {
+		if _, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, now); err != nil {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -1055,34 +1055,34 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 
 	t.Run("noncurrent recommended when lock is required without noncurrent expiry", func(t *testing.T) {
 		p := &config.SyncPair{RequireObjectLock: true, TargetExpireAt: &expire}
-		warns, err := ValidatePairOptions(p, "GOVERNANCE", true, false, nil, now)
+		warns, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, now)
 		if err != nil { t.Fatalf("err = %v", err) }
 		if !hasCode(warns, "noncurrent-recommended") { t.Fatalf("warnings = %v", warns) }
 	})
 
 	t.Run("no noncurrent warning when noncurrent expiry is set", func(t *testing.T) {
 		p := &config.SyncPair{RequireObjectLock: true, TargetExpireAt: &expire, NoncurrentExpireDays: 30}
-		warns, _ := ValidatePairOptions(p, "GOVERNANCE", true, false, nil, now)
+		warns, _ := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, now)
 		if hasCode(warns, "noncurrent-recommended") { t.Fatalf("warnings = %v", warns) }
 	})
 
 	t.Run("retention past expiry warns", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &expire}
-		warns, err := ValidatePairOptions(p, "COMPLIANCE", true, false, nil, now)
+		warns, err := ValidatePairOptions(p, "COMPLIANCE", 30, true, false, nil, now)
 		if err != nil { t.Fatalf("err = %v", err) }
 		if !hasCode(warns, "retention-past-expiry") { t.Fatalf("warnings = %v", warns) }
 	})
 
 	t.Run("clearing an expiry warns that the lifecycle rule survives", func(t *testing.T) {
 		p := &config.SyncPair{}
-		warns, err := ValidatePairOptions(p, "GOVERNANCE", true, false, &expire, now)
+		warns, err := ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &expire, now)
 		if err != nil { t.Fatalf("err = %v", err) }
 		if !hasCode(warns, "expiry-cleared") { t.Fatalf("warnings = %v", warns) }
 	})
 }
 ```
 
-Also a test for the compliance rule: `ValidatePairOptions` takes a `retentionMode string` parameter; `"COMPLIANCE"` with `acceptCompliance == false` returns `ErrComplianceNeedsConfirm`. Adjust the signature to `ValidatePairOptions(pair *config.SyncPair, retentionMode string, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)`.
+Also a test for the compliance rule: `ValidatePairOptions` takes a `retentionMode string` parameter; `"COMPLIANCE"` with `acceptCompliance == false` returns `ErrComplianceNeedsConfirm`. Adjust the signature to `ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)`.
 
 **Advisory warnings (spec §7.2), added by controller ruling during Task 3 review.** `ValidatePairOptions` also returns `[]AdvisoryWarning` with three codes, none of which are errors and none of which block pair creation:
 
@@ -1140,7 +1140,7 @@ Expected: FAIL — status 201 (the handler persists anything).
 
 - [ ] **Step 3: Implement the handler changes**
 
-`createSyncPair`: bind JSON, load the target bucket, call `warnings, err := ValidatePairOptions(&p, tgt.RetentionMode, in.AcceptCompliance, true, nil, time.Now().UTC())`, return the warnings in the response body as `warnings: [{code, message}]`, then call `sync.ProvisionPair`, returning `422` with `code: "preflight_failed"` on error and persisting only on success. `updateSyncPair`: extend the anonymous input struct with `ReplicateAttributes *bool`, `AttrsReconcileInterval *int`, `TargetExpireAt *string`, `ConfirmExpireEarlier *bool`; call `ValidatePairOptions` with the pair's current `TargetExpireAt` as `previousExpireAt` and `time.Now().UTC()` as `now`, returning its warnings in the response body the same way; reject any attempt to change lock fields with `400`. `enrichPair`: set `PendingAttrs` from `s.GetEngine(p.ID)` and `Expired` from `p.TargetExpireAt` being in the past.
+`createSyncPair`: bind JSON, load the target bucket, call `warnings, err := ValidatePairOptions(&p, tgt.RetentionMode, tgt.RetentionDays, in.AcceptCompliance, true, nil, time.Now().UTC())`, return the warnings in the response body as `warnings: [{code, message}]`, then call `sync.ProvisionPair`, returning `422` with `code: "preflight_failed"` on error and persisting only on success. `updateSyncPair`: extend the anonymous input struct with `ReplicateAttributes *bool`, `AttrsReconcileInterval *int`, `TargetExpireAt *string`, `ConfirmExpireEarlier *bool`; call `ValidatePairOptions` with the pair's current `TargetExpireAt` as `previousExpireAt` and `time.Now().UTC()` as `now`, returning its warnings in the response body the same way; reject any attempt to change lock fields with `400`. `enrichPair`: set `PendingAttrs` from `s.GetEngine(p.ID)` and `Expired` from `p.TargetExpireAt` being in the past.
 
 - [ ] **Step 4: Implement the UI changes**
 
