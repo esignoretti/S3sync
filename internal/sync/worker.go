@@ -15,7 +15,8 @@ import (
 
 type WorkerPool struct {
 	workers      int
-	client       *s3.Client
+	src          copyAPI
+	tgt          copyAPI
 	sourceBucket string
 	targetBucket string
 	throttler    *Throttler
@@ -23,10 +24,27 @@ type WorkerPool struct {
 	progress     *Progress
 }
 
+// copyAPI is the subset of the S3 API the copy and delete paths use.
+// *s3.Client satisfies it directly; tests substitute a fake.
+type copyAPI interface {
+	HeadObject(context.Context, *s3.HeadObjectInput, ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
+	CopyObject(context.Context, *s3.CopyObjectInput, ...func(*s3.Options)) (*s3.CopyObjectOutput, error)
+	GetObjectTagging(context.Context, *s3.GetObjectTaggingInput, ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error)
+	PutObjectTagging(context.Context, *s3.PutObjectTaggingInput, ...func(*s3.Options)) (*s3.PutObjectTaggingOutput, error)
+	DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+}
+
+// ErrObjectTooLarge reports a source object that CopyObject cannot move in one
+// request. It is permanent: the object will not shrink on a retry, so it is
+// returned unwrapped by retryS3.
+var ErrObjectTooLarge = errors.New("object exceeds the 5 GiB CopyObject limit")
+
+const maxCopyObjectSize = 5 << 30
+
 func NewWorkerPool(workers int, client *s3.Client, source, target string,
 	throttler *Throttler, storageClass string, progress *Progress) *WorkerPool {
 	return &WorkerPool{
-		workers: workers, client: client,
+		workers: workers, src: client, tgt: client,
 		sourceBucket: source, targetBucket: target,
 		throttler: throttler, storageClass: storageClass,
 		progress: progress,
@@ -94,44 +112,63 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	src := fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)
-	needCopy := true
+	copySource := fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)
+
+	// HEAD the source, not the target: ContentLength (and, later, the attributes
+	// worth replicating) lives on the source, and the differ has already decided
+	// this object needs copying. Probing the target here duplicated that decision
+	// and treated the 404 a brand-new key always produces as a retryable failure,
+	// so CopyObject was never issued for new objects.
+	var headOut *s3.HeadObjectOutput
+	vanished := false
 	err := retryS3(reqCtx, "HeadObject", func(c context.Context) error {
 		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
 			return err
 		}
-		headOut, err := wp.client.HeadObject(c, &s3.HeadObjectInput{
-			Bucket: &wp.targetBucket, Key: &a.Key,
+		out, err := wp.src.HeadObject(c, &s3.HeadObjectInput{
+			Bucket: &wp.sourceBucket, Key: &a.Key,
 		})
 		if err != nil {
+			// The differ listed this key moments ago; if it is gone now the source
+			// object vanished mid-run. That is a skip, not a failure, so it must not
+			// reach the retry budget or the failed count.
+			if isNotFound(err, "NotFound", "NoSuchKey") {
+				vanished = true
+				return nil
+			}
 			return err
 		}
-		if aws.ToString(headOut.ETag) == a.ETag {
-			needCopy = false
-		}
+		headOut = out
 		return nil
 	}, 3)
 	if err != nil {
 		return err
 	}
-	if !needCopy {
-		slog.Debug("skip unchanged", "key", a.Key)
+	if vanished {
+		slog.Debug("source object vanished", "key", a.Key)
 		return nil
 	}
 
+	if size := aws.ToInt64(headOut.ContentLength); size > maxCopyObjectSize {
+		return fmt.Errorf("%w: key %q is %d bytes, limit %d", ErrObjectTooLarge, a.Key, size, int64(maxCopyObjectSize))
+	}
+
+	// No target-side ETag comparison: the differ already decided this object
+	// differs, and the target does not evaluate x-amz-copy-source-if-match, so a
+	// conditional copy would buy nothing.
 	return retryS3(reqCtx, "CopyObject", func(c context.Context) error {
 		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
 			return err
 		}
 		output := &s3.CopyObjectInput{
 			Bucket:     &wp.targetBucket,
-			CopySource: &src,
+			CopySource: &copySource,
 			Key:        &a.Key,
 		}
 		if wp.storageClass != "" {
 			output.StorageClass = types.StorageClass(wp.storageClass)
 		}
-		_, err := wp.client.CopyObject(c, output)
+		_, err := wp.tgt.CopyObject(c, output)
 		return err
 	}, 3)
 }
@@ -143,7 +180,7 @@ func (wp *WorkerPool) deleteObject(ctx context.Context, a SyncAction) error {
 		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
 			return err
 		}
-		_, err := wp.client.DeleteObject(c, &s3.DeleteObjectInput{
+		_, err := wp.tgt.DeleteObject(c, &s3.DeleteObjectInput{
 			Bucket: &wp.targetBucket, Key: &a.Key,
 		})
 		return err
