@@ -656,3 +656,164 @@ func TestCopyObject_TaglessSourceClearsTargetTags(t *testing.T) {
 		t.Fatal("a tagless source still has a fingerprint")
 	}
 }
+
+// --- attribute-only action ---------------------------------------------------
+
+// The attribute-only action must never move bytes: the whole point of a separate
+// action is that a retry of the characteristics costs no copy.
+func TestApplyAttrs_NeverCopiesBytes(t *testing.T) {
+	api := &fakeCopyAPI{
+		headOut: &s3.HeadObjectOutput{ContentType: aws.String("text/csv")},
+		tags:    []s3types.Tag{{Key: aws.String("env"), Value: aws.String("prod")}},
+	}
+	wp := newTestWorkerPool(api)
+
+	got, err := wp.applyAttrs(context.Background(), SyncAction{Type: ActionCopyAttributes, Key: "k", ETag: `"e"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.copied != 0 {
+		t.Fatalf("CopyObject called %d times, want 0", api.copied)
+	}
+	if api.headBucket != testSourceBucket {
+		t.Fatalf("HEADed bucket %q, want the source bucket", api.headBucket)
+	}
+	if api.getTags != 1 || api.putTags != 1 {
+		t.Fatalf("tag calls: %d get, %d put; want 1 and 1", api.getTags, api.putTags)
+	}
+	if got.AttrsHash == "" || got.PendingAttrs {
+		t.Fatalf("action = %+v, want a fingerprint and pending false", got)
+	}
+	if got.Key != "k" || got.ETag != `"e"` {
+		t.Fatalf("action lost its identity: %+v", got)
+	}
+}
+
+// The retried tags belong to the target's current version, so no VersionId is
+// sent: naming one would tag a version that is no longer current.
+func TestApplyAttrs_TagsCurrentTargetVersion(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{}}
+	wp := newTestWorkerPool(api)
+
+	if _, err := wp.applyAttrs(context.Background(), SyncAction{Type: ActionCopyAttributes, Key: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	if api.putTagsIn.VersionId != nil {
+		t.Fatalf("VersionId = %q, want none: the current target version is the one to tag",
+			aws.ToString(api.putTagsIn.VersionId))
+	}
+}
+
+// The two paths must fingerprint the same source state identically, or a retried
+// object never matches what the writer recorded and the sweep loops forever.
+func TestApplyAttrs_HashMatchesCopyObject(t *testing.T) {
+	until := time.Now().UTC().Add(time.Hour)
+	newAPI := func() *fakeCopyAPI {
+		return &fakeCopyAPI{
+			headOut: &s3.HeadObjectOutput{
+				ContentType:               aws.String("image/png"),
+				Metadata:                  map[string]string{"owner": "ops"},
+				StorageClass:              s3types.StorageClassStandardIa,
+				ObjectLockMode:            s3types.ObjectLockModeGovernance,
+				ObjectLockRetainUntilDate: &until,
+			},
+			tags: []s3types.Tag{{Key: aws.String("env"), Value: aws.String("prod")}},
+		}
+	}
+
+	copyPool := newTestWorkerPool(newAPI())
+	copyPool.storageClass = "GLACIER"
+	copied, err := copyPool.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attrsPool := newTestWorkerPool(newAPI())
+	attrsPool.storageClass = "GLACIER"
+	retried, err := attrsPool.applyAttrs(context.Background(), SyncAction{Type: ActionCopyAttributes, Key: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if retried.AttrsHash != copied.AttrsHash {
+		t.Fatalf("applyAttrs hash = %q, copyObject hash = %q; the retry can never converge",
+			retried.AttrsHash, copied.AttrsHash)
+	}
+}
+
+// A tag failure leaves the characteristics partially applied, exactly as it does
+// after a copy: the bytes are untouched and still correct.
+func TestApplyAttrs_TagFailureMarksPending(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{}, putTagsErr: errors.New("nope")}
+	wp := newTestWorkerPool(api)
+
+	got, err := wp.applyAttrs(context.Background(), SyncAction{Type: ActionCopyAttributes, Key: "k"})
+	if err != nil {
+		t.Fatalf("a tag failure must not fail the action: %v", err)
+	}
+	if !got.PendingAttrs {
+		t.Fatal("PendingAttrs must be true after a tag failure")
+	}
+	if got.AttrsHash != "" {
+		t.Fatalf("AttrsHash = %q, want empty after a partial application", got.AttrsHash)
+	}
+	if api.copied != 0 {
+		t.Fatalf("CopyObject called %d times, want 0", api.copied)
+	}
+}
+
+// The source can vanish between the sweep and the action; that is the same skip
+// as a vanished copy source.
+func TestApplyAttrs_VanishedSourceIsSkipped(t *testing.T) {
+	api := &fakeCopyAPI{headErr: &s3types.NotFound{}}
+	wp := newTestWorkerPool(api)
+
+	_, err := wp.applyAttrs(context.Background(), SyncAction{Type: ActionCopyAttributes, Key: "gone"})
+	if !errors.Is(err, errObjectVanished) {
+		t.Fatalf("applyAttrs returned %v; a vanished source must report errObjectVanished", err)
+	}
+	if api.putTags != 0 {
+		t.Fatalf("PutObjectTagging called %d times, want 0", api.putTags)
+	}
+}
+
+// With replication off there is nothing to apply, and the empty fingerprint
+// stops the differ and the sweep from asking again.
+func TestApplyAttrs_WithoutAttrReplicationDoesNothing(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{}}
+	wp := newTestWorkerPoolWithoutAttrs(api)
+
+	got, err := wp.applyAttrs(context.Background(), SyncAction{Type: ActionCopyAttributes, Key: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.headCalls != 0 || api.getTags != 0 || api.putTags != 0 {
+		t.Fatalf("calls: %d head, %d get, %d put; want 0", api.headCalls, api.getTags, api.putTags)
+	}
+	if got.AttrsHash != "" || got.PendingAttrs {
+		t.Fatalf("action = %+v, want no hash and not pending", got)
+	}
+}
+
+// Run must route the new action type to applyAttrs, not to the copy path.
+func TestWorkerPoolRun_DispatchesCopyAttributes(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{ContentType: aws.String("text/csv")}}
+	wp := newTestWorkerPool(api)
+	actions := make(chan SyncAction, 1)
+	actions <- SyncAction{Type: ActionCopyAttributes, Key: "k", ETag: `"e"`}
+	close(actions)
+
+	succeeded, _, failed := wp.Run(context.Background(), actions)
+	if failed != 0 || len(succeeded) != 1 {
+		t.Fatalf("Run: succeeded %d, failed %d", len(succeeded), failed)
+	}
+	if api.copied != 0 {
+		t.Fatalf("CopyObject called %d times, want 0", api.copied)
+	}
+	if api.putTags != 1 {
+		t.Fatalf("PutObjectTagging called %d times, want 1", api.putTags)
+	}
+	if succeeded[0].AttrsHash == "" {
+		t.Fatal("Run dropped the fingerprint")
+	}
+}

@@ -84,6 +84,8 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 					out, err = wp.copyObject(ctx, a)
 				case ActionDelete:
 					err = wp.deleteObject(ctx, a)
+				case ActionCopyAttributes:
+					out, err = wp.applyAttrs(ctx, a)
 				}
 				if err != nil {
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, errObjectVanished) {
@@ -150,18 +152,7 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction,
 
 	var attrs ObjectAttrs
 	if wp.replicateAttrs {
-		attrs = AttrsFromHead(headOut)
-		if attrs.RetainUntil != nil && !attrs.liveRetention(time.Now().UTC()) {
-			// Sending a past RetainUntilDate makes S3 reject the whole copy, and it
-			// protects nothing, so the lock fields are dropped for this object.
-			slog.Debug("source retention already expired, not replicating lock",
-				"key", a.Key, "retain_until", attrs.RetainUntil.UTC().Format(time.RFC3339))
-		}
-		// The fingerprint records the class the target will actually have, not the
-		// source's: with a pair override the source class is never applied, so
-		// hashing it would report drift the copy can never fix. The reconciler
-		// applies the same transformation before comparing.
-		attrs = attrs.WithEffectiveStorageClass(wp.storageClass)
+		attrs = wp.effectiveAttrs(a.Key, headOut)
 	}
 
 	// No target-side ETag comparison: the differ already decided this object
@@ -176,32 +167,96 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction,
 		return a, nil
 	}
 
-	// Tags cannot ride on CopyObject on this endpoint (x-amz-tagging is not
-	// applied), so they are read from the source and written to the target. HEAD
-	// could not see them, which is why AttrsFromHead leaves Tags nil and they are
-	// attached here before hashing.
-	tags, err := wp.sourceTags(reqCtx, a.Key)
-	if err != nil {
-		// The bytes are correct; only the characteristics are incomplete. Retrying
-		// the copy would re-copy bytes for no reason, so this is a pending state.
-		slog.Warn("read source tags", "key", a.Key, "error", err)
-		a.PendingAttrs = true
-		return a, nil
-	}
-	attrs.Tags = tags
-
 	var versionID *string
 	if copyOut != nil {
 		versionID = copyOut.VersionId
 	}
-	if err := wp.applyTags(reqCtx, a.Key, tags, versionID); err != nil {
-		slog.Warn("apply target tags", "key", a.Key, "error", err)
+	attrs, ok := wp.writeAttrs(reqCtx, a.Key, attrs, versionID)
+	if !ok {
+		// The bytes are correct; only the characteristics are incomplete. Retrying
+		// the copy would re-copy bytes for no reason, so this is a pending state.
 		a.PendingAttrs = true
 		return a, nil
 	}
 
 	a.AttrsHash = attrs.Hash()
 	return a, nil
+}
+
+// applyAttrs applies the characteristics of an object whose bytes are already on
+// the target. It runs the same attribute phase as copyObject and nothing else:
+// no CopyObject, no size check, and no VersionId, so the target's current
+// version is the one tagged.
+//
+// This is what a pending_attrs entry or a drifted fingerprint turns into, so the
+// two paths must fingerprint identically or the sweep re-emits the action every
+// cycle.
+func (wp *WorkerPool) applyAttrs(ctx context.Context, a SyncAction) (SyncAction, error) {
+	if !wp.replicateAttrs {
+		// Attribute replication is off, so nothing here is wanted on the target.
+		// The empty hash records "unknown", which stops the differ and the sweep
+		// from asking again.
+		return a, nil
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	headOut, err := wp.headSource(reqCtx, a.Key)
+	if err != nil {
+		return a, err
+	}
+	if headOut == nil {
+		slog.Debug("source object vanished", "key", a.Key)
+		return a, errObjectVanished
+	}
+
+	attrs, ok := wp.writeAttrs(reqCtx, a.Key, wp.effectiveAttrs(a.Key, headOut), nil)
+	if !ok {
+		a.PendingAttrs = true
+		return a, nil
+	}
+
+	a.AttrsHash = attrs.Hash()
+	return a, nil
+}
+
+// effectiveAttrs reads the characteristics a source HEAD can see and normalizes
+// the storage class to the one the target will actually carry. Every fingerprint
+// goes through here, on the writer and on the sweep alike: with a pair override
+// the source class is never applied, so hashing it would report drift no copy
+// can fix.
+func (wp *WorkerPool) effectiveAttrs(key string, headOut *s3.HeadObjectOutput) ObjectAttrs {
+	attrs := AttrsFromHead(headOut)
+	if attrs.RetainUntil != nil && !attrs.liveRetention(time.Now().UTC()) {
+		// Sending a past RetainUntilDate makes S3 reject the whole copy, and it
+		// protects nothing, so the lock fields are dropped for this object.
+		slog.Debug("source retention already expired, not replicating lock",
+			"key", key, "retain_until", attrs.RetainUntil.UTC().Format(time.RFC3339))
+	}
+	return attrs.WithEffectiveStorageClass(wp.storageClass)
+}
+
+// writeAttrs reads the source's tags and writes them onto the target, returning
+// the attributes with Tags filled in. ok is false when the characteristics are
+// only partially applied, which the caller records as pending.
+//
+// Tags cannot ride on CopyObject on this endpoint (x-amz-tagging is not applied),
+// so they always travel through GetObjectTagging and PutObjectTagging. HEAD could
+// not see them, which is why AttrsFromHead leaves Tags nil and they are attached
+// here before hashing.
+func (wp *WorkerPool) writeAttrs(ctx context.Context, key string, attrs ObjectAttrs, versionID *string) (ObjectAttrs, bool) {
+	tags, err := wp.sourceTags(ctx, key)
+	if err != nil {
+		slog.Warn("read source tags", "key", key, "error", err)
+		return attrs, false
+	}
+	attrs.Tags = tags
+	if err := wp.applyTags(ctx, key, tags, versionID); err != nil {
+		slog.Warn("apply target tags", "key", key, "error", err)
+		return attrs, false
+	}
+	return attrs, true
 }
 
 // headSource HEADs the source object. It returns (nil, nil) when the object is

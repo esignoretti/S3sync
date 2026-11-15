@@ -15,6 +15,9 @@ type ActionType int
 const (
 	ActionCopy ActionType = iota
 	ActionDelete
+	// ActionCopyAttributes retries only the characteristics of an object whose
+	// bytes already match. Appended last so the existing values never shift.
+	ActionCopyAttributes
 )
 
 type SyncAction struct {
@@ -158,11 +161,24 @@ func StreamingDiff(
 			cacheHasMore = cacheCur.Next()
 		} else {
 			co := cacheCur.Object()
-			if co.ETag != aws.ToString(listObj.ETag) || !co.LastModified.Equal(aws.ToTime(listObj.LastModified)) {
+			etag := aws.ToString(listObj.ETag)
+			lastModified := aws.ToTime(listObj.LastModified)
+			switch {
+			case co.ETag != etag || !co.LastModified.Equal(lastModified):
 				actions <- SyncAction{
 					Type: ActionCopy, Key: aws.ToString(listObj.Key),
-					ETag: aws.ToString(listObj.ETag), Size: aws.ToInt64(listObj.Size),
-					LastModified: aws.ToTime(listObj.LastModified),
+					ETag: etag, Size: aws.ToInt64(listObj.Size),
+					LastModified: lastModified,
+				}
+			case co.PendingAttrs:
+				// The bytes match, so no copy will run and nothing would carry
+				// the characteristics: retry them on their own. This is the only
+				// way a tag or metadata change gets applied, because neither
+				// bumps the ETag or LastModified the differ compares.
+				actions <- SyncAction{
+					Type: ActionCopyAttributes, Key: aws.ToString(listObj.Key),
+					ETag: etag, Size: aws.ToInt64(listObj.Size),
+					LastModified: lastModified,
 				}
 			}
 			listObj, listHasMore = nextListObj()
