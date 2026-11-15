@@ -208,36 +208,53 @@ func (s *Server) getSyncPair(c *gin.Context) {
 		respondError(c, http.StatusNotFound, err.Error())
 		return
 	}
-	respond(c, http.StatusOK, p)
+	// Enriched like the list endpoint so `expired` and `attrs_pending` are not
+	// missing for clients that fetch a single pair.
+	r := s.enrichPair(*p)
+	if eng, ok := s.GetEngine(p.ID); ok {
+		running, lastRun, status, lastError, prog := eng.Status()
+		r.Running = running
+		r.LastError = lastError
+		r.Progress = &prog
+		r.LastSyncStatus = status
+		if !lastRun.IsZero() {
+			r.LastSyncAt = &lastRun
+		}
+	}
+	respond(c, http.StatusOK, r)
 }
 
-func (s *Server) updateSyncPair(c *gin.Context) {
-	id := c.Param("id")
-	var in struct {
-		SyncInterval           *int    `json:"sync_interval"`
-		WorkerCount            *int    `json:"worker_count"`
-		MaxGetOpsPerMinute     *int    `json:"max_get_ops_per_minute"`
-		WebhookURL             *string `json:"webhook_url"`
-		WebhookEvents          *string `json:"webhook_events"`
-		DryRun                 *bool   `json:"dry_run"`
-		ReplicateAttributes    *bool   `json:"replicate_attributes"`
-		AttrsReconcileInterval *int    `json:"attrs_reconcile_interval"`
-		TargetExpireAt         *string `json:"target_expire_at"`
-		ConfirmExpireEarlier   *bool   `json:"confirm_expire_earlier"`
-		AcceptCompliance       *bool   `json:"accept_compliance"`
-		// Lock settings are rejected when present: they can only be chosen when
-		// the bucket is created, so accepting them here would be a silent no-op.
-		RequireObjectLock *bool   `json:"require_object_lock"`
-		OnLockMissing     *string `json:"on_lock_missing"`
-	}
-	if err := c.ShouldBindJSON(&in); err != nil {
-		respondError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	p, err := s.repo.GetSyncPair(id)
-	if err != nil {
-		respondError(c, http.StatusNotFound, err.Error())
-		return
+// syncPairUpdateInput is the partial-update body for PUT /sync-pairs/:id.
+// Every field is a pointer so an absent key means "leave unchanged".
+type syncPairUpdateInput struct {
+	SyncInterval           *int    `json:"sync_interval"`
+	WorkerCount            *int    `json:"worker_count"`
+	MaxGetOpsPerMinute     *int    `json:"max_get_ops_per_minute"`
+	WebhookURL             *string `json:"webhook_url"`
+	WebhookEvents          *string `json:"webhook_events"`
+	DryRun                 *bool   `json:"dry_run"`
+	ReplicateAttributes    *bool   `json:"replicate_attributes"`
+	AttrsReconcileInterval *int    `json:"attrs_reconcile_interval"`
+	TargetExpireAt         *string `json:"target_expire_at"`
+	ConfirmExpireEarlier   *bool   `json:"confirm_expire_earlier"`
+	AcceptCompliance       *bool   `json:"accept_compliance"`
+	// Noncurrent-version rules are mutable after creation: the lifecycle config
+	// is rewritten wholesale. The CLI exposes them on `pair update`, so the API
+	// must too or the two surfaces diverge on a field that also drives the
+	// noncurrent-recommended advisory.
+	NoncurrentExpireDays    *int `json:"noncurrent_expire_days"`
+	NewerNoncurrentVersions *int `json:"newer_noncurrent_versions"`
+	// Lock settings are rejected when present: they can only be chosen when the
+	// bucket is created, so accepting them here would be a silent no-op.
+	RequireObjectLock *bool   `json:"require_object_lock"`
+	OnLockMissing     *string `json:"on_lock_missing"`
+}
+
+// apply copies the fields the caller supplied onto p. It reports whether a lock
+// field was present, which the caller must reject rather than apply.
+func (in *syncPairUpdateInput) apply(p *config.SyncPair) (lockFieldPresent bool, err error) {
+	if in.RequireObjectLock != nil || in.OnLockMissing != nil {
+		return true, nil
 	}
 	if in.SyncInterval != nil {
 		p.SyncInterval = *in.SyncInterval
@@ -257,27 +274,54 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 	if in.DryRun != nil {
 		p.DryRun = *in.DryRun
 	}
-	if in.RequireObjectLock != nil || in.OnLockMissing != nil {
-		respondError(c, http.StatusBadRequest,
-			"require_object_lock and on_lock_missing cannot be changed after pair creation: "+
-				"object lock can only be enabled when a bucket is created")
-		return
-	}
-
-	previousExpireAt := p.TargetExpireAt
 	if in.ReplicateAttributes != nil {
 		p.ReplicateAttributes = *in.ReplicateAttributes
 	}
 	if in.AttrsReconcileInterval != nil {
 		p.AttrsReconcileInterval = *in.AttrsReconcileInterval
 	}
+	if in.NoncurrentExpireDays != nil {
+		p.NoncurrentExpireDays = *in.NoncurrentExpireDays
+	}
+	if in.NewerNoncurrentVersions != nil {
+		p.NewerNoncurrentVersions = *in.NewerNoncurrentVersions
+	}
 	if in.TargetExpireAt != nil {
 		t, err := parseExpireAt(*in.TargetExpireAt)
 		if err != nil {
-			respondError(c, http.StatusBadRequest, err.Error())
-			return
+			return false, err
 		}
 		p.TargetExpireAt = t
+	}
+	return false, nil
+}
+
+func (s *Server) updateSyncPair(c *gin.Context) {
+	id := c.Param("id")
+	var in syncPairUpdateInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	p, err := s.repo.GetSyncPair(id)
+	if err != nil {
+		respondError(c, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Captured before apply so the earlier-date confirmation compares against the
+	// stored value; apply reassigns the field rather than writing through it.
+	previousExpireAt := p.TargetExpireAt
+	lockFieldPresent, err := in.apply(p)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if lockFieldPresent {
+		respondError(c, http.StatusBadRequest,
+			"require_object_lock and on_lock_missing cannot be changed after pair creation: "+
+				"object lock can only be enabled when a bucket is created")
+		return
 	}
 
 	tgt, err := s.repo.GetBucket(p.TargetBucketID)
