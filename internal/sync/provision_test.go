@@ -3,17 +3,35 @@ package sync
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/esignoretti/S3sync/internal/config"
 )
+
+// smithyStatusError is the smithy shape for a bare status code with an empty
+// body.
+func smithyStatusError(status int) *smithyhttp.ResponseError {
+	return &smithyhttp.ResponseError{Response: &smithyhttp.Response{
+		Response: &http.Response{StatusCode: status},
+	}}
+}
+
+// awsStatusError is what the client actually returns: the AWS middleware wraps
+// every operation error in awshttp.ResponseError, whose As delegates to the
+// smithy error inside.
+func awsStatusError(status int) error {
+	return &awshttp.ResponseError{ResponseError: smithyStatusError(status)}
+}
 
 // The real client must satisfy targetAPI with no adapter type.
 var _ targetAPI = (*s3.Client)(nil)
@@ -22,6 +40,7 @@ type fakeTarget struct {
 	headErr      error
 	objects      int32
 	lockEnabled  bool
+	lockErr      error
 	versioning   bool
 	lifecycleErr error
 	existing     []s3types.LifecycleRule
@@ -90,6 +109,9 @@ func (f *fakeTarget) PutObjectLockConfiguration(_ context.Context, in *s3.PutObj
 
 func (f *fakeTarget) GetObjectLockConfiguration(_ context.Context, _ *s3.GetObjectLockConfigurationInput, _ ...func(*s3.Options)) (*s3.GetObjectLockConfigurationOutput, error) {
 	f.record("GetObjectLockConfiguration")
+	if f.lockErr != nil {
+		return nil, f.lockErr
+	}
 	if !f.lockEnabled {
 		return &s3.GetObjectLockConfigurationOutput{}, nil
 	}
@@ -191,6 +213,34 @@ func TestProvisionTargetDecisionTable(t *testing.T) {
 			pair:     &config.SyncPair{},
 			wantCall: []string{"HeadBucket"},
 		},
+		{
+			name:     "modelled lock-not-found code means lock missing",
+			target:   &fakeTarget{lockErr: &smithy.GenericAPIError{Code: "ObjectLockConfigurationNotFoundError"}},
+			pair:     &config.SyncPair{RequireObjectLock: true, OnLockMissing: "fail"},
+			wantErr:  ErrLockMissing,
+			wantCall: []string{"HeadBucket", "GetObjectLockConfiguration"},
+		},
+		{
+			name:     "bare 404 from lock check means lock missing",
+			target:   &fakeTarget{lockErr: smithyStatusError(http.StatusNotFound)},
+			pair:     &config.SyncPair{RequireObjectLock: true, OnLockMissing: "fail"},
+			wantErr:  ErrLockMissing,
+			wantCall: []string{"HeadBucket", "GetObjectLockConfiguration"},
+		},
+		{
+			name:     "client-wrapped 404 from lock check means lock missing",
+			target:   &fakeTarget{lockErr: awsStatusError(http.StatusNotFound)},
+			pair:     &config.SyncPair{RequireObjectLock: true, OnLockMissing: "fail"},
+			wantErr:  ErrLockMissing,
+			wantCall: []string{"HeadBucket", "GetObjectLockConfiguration"},
+		},
+		{
+			name:     "already-locked bucket is never deleted even when recreate is allowed",
+			target:   &fakeTarget{lockEnabled: true},
+			pair:     &config.SyncPair{RequireObjectLock: true, OnLockMissing: "recreate"},
+			opts:     ProvisionOptions{ForceRecreate: true},
+			wantCall: []string{"HeadBucket", "GetObjectLockConfiguration"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -245,6 +295,66 @@ func TestProvisionTargetLifecycleNoPreviousConfig(t *testing.T) {
 	if !reflect.DeepEqual(fake.lifecycleSet, want) {
 		t.Fatalf("lifecycle rules = %+v, want %+v", fake.lifecycleSet, want)
 	}
+}
+
+func TestProvisionTargetLifecycleBare404IsNoPreviousConfig(t *testing.T) {
+	exp := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	fake := &fakeTarget{headErr: &s3types.NotFound{}, lifecycleErr: smithyStatusError(http.StatusNotFound)}
+	pair := &config.SyncPair{TargetExpireAt: &exp}
+
+	if err := ProvisionTarget(context.Background(), fake, "us-east-1",
+		&config.Bucket{BucketName: "b"}, pair, ProvisionOptions{Now: now}); err != nil {
+		t.Fatalf("a bare 404 must be treated as no previous config, got %v", err)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"HeadBucket", "CreateBucket",
+		"GetBucketLifecycleConfiguration", "PutBucketLifecycleConfiguration"}) {
+		t.Fatalf("calls = %v", fake.calls)
+	}
+}
+
+func TestProvisionTargetLifecycleLogsPreviousConfig(t *testing.T) {
+	exp := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	fake := &fakeTarget{
+		headErr:  &s3types.NotFound{},
+		existing: []s3types.LifecycleRule{{ID: aws.String("old")}},
+	}
+	pair := &config.SyncPair{TargetExpireAt: &exp}
+
+	if err := ProvisionTarget(context.Background(), fake, "us-east-1",
+		&config.Bucket{BucketName: "b"}, pair, ProvisionOptions{Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"HeadBucket", "CreateBucket",
+		"GetBucketLifecycleConfiguration", "PutBucketLifecycleConfiguration"}) {
+		t.Fatalf("calls = %v", fake.calls)
+	}
+}
+
+func TestProvisionTargetZeroNowFallsBackToWallClock(t *testing.T) {
+	t.Run("future expiry succeeds", func(t *testing.T) {
+		exp := time.Date(2099, 3, 1, 0, 0, 0, 0, time.UTC)
+		fake := &fakeTarget{headErr: &s3types.NotFound{}}
+		if err := ProvisionTarget(context.Background(), fake, "us-east-1",
+			&config.Bucket{BucketName: "b"}, &config.SyncPair{TargetExpireAt: &exp}, ProvisionOptions{}); err != nil {
+			t.Fatalf("zero Now must fall back to the wall clock, got %v", err)
+		}
+		if fake.lifecycleIn == nil {
+			t.Fatal("lifecycle must be applied")
+		}
+	})
+	t.Run("past expiry is rejected", func(t *testing.T) {
+		// A zero Now must not be read as year 1: that would make every date
+		// look like the future and silently skip ErrExpireInPast.
+		exp := time.Date(2020, 3, 1, 0, 0, 0, 0, time.UTC)
+		fake := &fakeTarget{headErr: &s3types.NotFound{}}
+		err := ProvisionTarget(context.Background(), fake, "us-east-1",
+			&config.Bucket{BucketName: "b"}, &config.SyncPair{TargetExpireAt: &exp}, ProvisionOptions{})
+		if !errors.Is(err, ErrExpireInPast) {
+			t.Fatalf("err = %v, want ErrExpireInPast", err)
+		}
+	})
 }
 
 func TestProvisionTargetLifecycleGetErrorIsWrapped(t *testing.T) {

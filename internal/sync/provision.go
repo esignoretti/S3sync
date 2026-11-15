@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/esignoretti/S3sync/internal/config"
 )
 
@@ -125,6 +127,12 @@ func objectLockEnabled(ctx context.Context, api targetAPI, bucket string) (bool,
 		Bucket: aws.String(bucket),
 	})
 	if err != nil {
+		// An endpoint that has no lock configuration to report says so with
+		// either the modelled code or a bare 404; both mean "not enabled",
+		// not "the check failed".
+		if isNotFound(err, "ObjectLockConfigurationNotFoundError") {
+			return false, nil
+		}
 		return false, err
 	}
 	if out.ObjectLockConfiguration == nil {
@@ -220,7 +228,7 @@ func applyLifecycle(ctx context.Context, api targetAPI, bucket string, rules []s
 	prev, err := api.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{
 		Bucket: aws.String(bucket),
 	})
-	if err != nil && !isNoSuchLifecycleConfiguration(err) {
+	if err != nil && !isNotFound(err, "NoSuchLifecycleConfiguration") {
 		return fmt.Errorf("read target lifecycle configuration: %w", err)
 	}
 	if err == nil {
@@ -241,11 +249,23 @@ func applyLifecycle(ctx context.Context, api targetAPI, bucket string, rules []s
 	return nil
 }
 
-// isNoSuchLifecycleConfiguration reports whether err is the target's normal
-// "this bucket has no lifecycle config yet" answer.
-func isNoSuchLifecycleConfiguration(err error) bool {
+// isNotFound reports whether err is the endpoint's "the resource you asked
+// about is absent" answer for an operation that uses one of codes. The S3
+// deserializers for these operations have no typed error and fall back to
+// smithy.GenericAPIError, and an empty error body is given a code derived from
+// the status text ("NotFound" for 404), so a bare 404 status counts as absent
+// too.
+func isNotFound(err error, codes ...string) bool {
 	var apiErr smithy.APIError
-	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchLifecycleConfiguration"
+	if errors.As(err, &apiErr) {
+		for _, code := range codes {
+			if apiErr.ErrorCode() == code {
+				return true
+			}
+		}
+	}
+	var respErr *smithyhttp.ResponseError
+	return errors.As(err, &respErr) && respErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 func warnIfMismatch(ctx context.Context, api targetAPI, tgt *config.Bucket) {
