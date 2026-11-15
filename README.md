@@ -1,6 +1,6 @@
 # S3sync
 
-One-way S3-compatible bucket sync. CLI, REST API, and embedded web UI. Configurable parallelism, token-bucket throttling, object lock support.
+One-way S3-compatible bucket sync. CLI, REST API, and embedded web UI. Configurable parallelism, token-bucket throttling, object lock support, optional replication of object characteristics, and target expiry dates.
 
 Optimized for **Cubbit DS3** but works with any S3-compatible endpoint (AWS, MinIO, etc.).
 
@@ -8,7 +8,7 @@ Optimized for **Cubbit DS3** but works with any S3-compatible endpoint (AWS, Min
 s3sync config init
 s3sync bucket add prod-source   --endpoint https://s3.cubbit.eu --region eu-west-1 --bucket-name my-data --access-key AKID --secret-key secret
 s3sync bucket add prod-target   --endpoint https://s3.cubbit.eu --region eu-west-1 --bucket-name my-data-replica --access-key AKID --secret-key secret --versioning --object-lock --retention-mode GOVERNANCE --retention-days 365
-s3sync pair add prod-sync       --source-bucket <src-id> --target-bucket <tgt-id> --interval 300 --workers 20 --max-ops 600
+s3sync pair add prod-sync       --source-bucket <src-id> --target-bucket <tgt-id> --interval 300 --workers 20 --max-ops 600 --replicate-attributes --target-expire-at 2027-06-01
 s3sync pair sync <pair-id>
 ```
 
@@ -18,6 +18,9 @@ s3sync pair sync <pair-id>
 - **Parallel transfers** — configurable goroutine worker pool per sync pair
 - **Throttling** — token bucket limits GET ops per minute on source bucket
 - **Target auto-config** — creates bucket, enables versioning, object lock with retention
+- **Attribute replication** — optionally copies metadata, tags, storage class, retention and legal hold, not just bytes (opt-in per pair)
+- **Target expiry** — a bucket lifecycle rule expires the whole target at a chosen date, optionally with noncurrent-version cleanup
+- **Drift sweep** — optional periodic re-check of replicated attributes, so tag or metadata edits that bump neither ETag nor LastModified still converge
 - **CLI + API + Web UI** — single binary, `serve` mode starts all three
 - **Dual DB** — SQLite for config, BoltDB for sync cache
 - **Encrypted credentials** — AES-256-GCM with master key env var
@@ -68,6 +71,19 @@ s3sync pair add my-sync \
   --workers 10 \
   --max-ops 600
 
+# 3b. Optionally: replicate object characteristics and expire the target
+s3sync pair add my-sync \
+  --source-bucket <source-id-from-list> \
+  --target-bucket <target-id-from-list> \
+  --interval 300 \
+  --replicate-attributes \
+  --target-expire-at 2027-06-01 \
+  --noncurrent-expire-days 30 \
+  --newer-noncurrent-versions 3 \
+  --require-object-lock \
+  --on-lock-missing fail \
+  --attrs-reconcile-interval 3600
+
 # 4. Trigger one-shot sync
 s3sync pair sync <pair-id>
 
@@ -97,10 +113,17 @@ Commands:
   pair              Manage sync pairs
     pair add        Create a sync pair (--source-bucket, --target-bucket,
                     --interval, --workers, --max-ops, --delete-propagation,
-                    --storage-class)
+                    --storage-class, --replicate-attributes,
+                    --target-expire-at, --noncurrent-expire-days,
+                    --newer-noncurrent-versions, --require-object-lock,
+                    --on-lock-missing, --force-recreate, --accept-compliance,
+                    --attrs-reconcile-interval)
     pair list       List sync pairs
     pair get        Get pair details (JSON)
-    pair update     Update a pair
+    pair update     Update a pair (--interval, --workers, --max-ops,
+                    --replicate-attributes, --attrs-reconcile-interval,
+                    --target-expire-at, --confirm-expire-earlier,
+                    --noncurrent-expire-days, --newer-noncurrent-versions)
     pair delete     Delete a pair
     pair sync       Trigger one-shot sync
 
@@ -126,7 +149,8 @@ Global Flags:
 ### Web Dashboard
 
 Cards show per-pair:
-- Status pill (synced, running, error, idle)
+- Status pill (synced, running, error, idle, expired)
+- Badges for object lock, attribute replication, expiry date, and pending attribute repairs
 - Source and target with endpoint URLs
 - Sync interval, worker count
 - Last sync time and error count
@@ -143,7 +167,7 @@ Cards show per-pair:
 
 ## API
 
-All responses wrapped in `{"data": ...}` envelope. Errors return `{"error": "..."}`.
+All responses wrapped in `{"data": ...}` envelope. Errors return `{"error": "..."}` and, for preflight rejections, `{"code": "preflight_failed"}`. Pair creation and update additionally return `"warnings"` — a list of `{"code", "message"}` advisories that did not block the write.
 
 ### Buckets
 
@@ -162,7 +186,7 @@ All responses wrapped in `{"data": ...}` envelope. Errors return `{"error": "...
 | POST | `/api/sync-pairs` | Create sync pair |
 | GET | `/api/sync-pairs` | List all (enriched with live engine status) |
 | GET | `/api/sync-pairs/:id` | Get one |
-| PUT | `/api/sync-pairs/:id` | Partial update (sync_interval, worker_count, max_get_ops_per_minute) |
+| PUT | `/api/sync-pairs/:id` | Partial update (sync_interval, worker_count, max_get_ops_per_minute, replicate_attributes, attrs_reconcile_interval, target_expire_at, noncurrent_expire_days, newer_noncurrent_versions; requires accept_compliance / confirm_expire_earlier for those cases) |
 | DELETE | `/api/sync-pairs/:id` | Delete + stop engine |
 | POST | `/api/sync-pairs/:id/sync` | Trigger one-shot sync |
 | POST | `/api/sync-pairs/:id/disable` | Toggle enabled (Pause/Resume) |
@@ -198,7 +222,7 @@ Sync engine per pair (goroutine):
 
 Worker pool:
   N goroutines pull from buffered action channel
-  Each action: throttle.Wait → HEAD target (skip if same ETag) → CopyObject / DeleteObject
+  Each action: throttle.Wait → HEAD source (size guard, attributes) → CopyObject / DeleteObject
   Token-bucket rate limiter per pair
 
 Only successfully transferred objects are cached.
@@ -222,13 +246,66 @@ Each cycle:
 
 On server restart, cache persists. First sync cycle compares all source ETags against cached ETags. Already-synced objects match and skip. Only new or changed objects are copied.
 
-If cache is missing or corrupted, `copyObject` does a HEAD on the target — if target ETag matches source, the copy is skipped. No redundant transfers in either case.
+If the cache is missing or corrupted, everything is re-copied. The diff cache is the sole authority on what has already been transferred: `CopyObject` is issued unconditionally for every action the differ emits. A target-side HEAD is deliberately *not* used as a skip test — Cubbit DS3 does not evaluate `x-amz-copy-source-if-*` conditions, so a probe could never prevent a redundant copy, it could only add a request.
+
+## Replicating Object Characteristics
+
+By default a pair copies bytes and the storage class. With `--replicate-attributes` it also carries the source object's characteristics to the target:
+
+| Characteristic | How |
+|----------------|-----|
+| Metadata (`x-amz-meta-*`) | `MetadataDirective: REPLACE` on the copy |
+| Content-Type, Content-Disposition, Content-Encoding, Cache-Control | Same, set explicitly |
+| Tags | Separate `GetObjectTagging` → `PutObjectTagging` (the copy call ignores `x-amz-tagging` on Cubbit DS3) |
+| Storage class | On the copy; `--storage-class` overrides the source's |
+| Retention mode + retain-until | `x-amz-object-lock-*` headers on the copy |
+| Legal hold | Same |
+
+`Content-Language` and `Expires` are **not** replicated: Cubbit DS3 does not store them.
+
+**Fingerprint.** Tag, metadata and retention edits bump neither ETag nor LastModified, so the normal diff cannot see them. Each cached object therefore stores a hash of its replicated attributes. If any attribute cannot be applied (a tag read or write fails), the object is marked `pending_attrs` and the next cycle retries just its attributes — visible as an `attrs pending` badge in the dashboard and as `attrs_pending` on the API.
+
+**Drift sweep.** `--attrs-reconcile-interval <seconds>` (default off) periodically re-reads each source object's attributes and re-copies any whose fingerprint no longer matches the cache. This is what catches tag-only edits on objects whose bytes never changed. It costs one HEAD plus one tag read per cached object per sweep, throttled against `max_get_ops_per_minute`.
+
+## Object Lock and Target Expiry
+
+**Object lock** can only be enabled when a bucket is created — never afterwards. Because a pair creates its target on first sync, lock is a pair-creation decision:
+
+```bash
+s3sync pair add ... --require-object-lock --on-lock-missing fail
+```
+
+`--on-lock-missing fail` (default) refuses to start when the target exists without lock. `--on-lock-missing recreate` deletes and recreates the target — it requires `--force-recreate` and an **empty** bucket, and it destroys data. On the web UI the same option requires typing the target bucket name to confirm. Both settings are immutable after the pair exists; `pair update` rejects them.
+
+**Expiry** sets a bucket lifecycle rule that expires every object in the target at a midnight-UTC date:
+
+```bash
+s3sync pair add ... --target-expire-at 2027-06-01
+```
+
+Cubbit DS3 supports neither `Filter` nor `Prefix` in lifecycle rules, so an expiry date applies to the **whole bucket**. Add `--noncurrent-expire-days` to also purge old versions, and `--newer-noncurrent-versions N` to keep the N most recent.
+
+Moving an expiry date **earlier** needs `--confirm-expire-earlier` on the CLI or a confirmation in the UI. Clearing it with `--target-expire-at ""` leaves the old lifecycle rule in place — the tool warns (`expiry-cleared`) and skips writing an empty rule set, which the endpoint would reject; clear it manually if you mean it.
+
+**After expiry, a pair refuses to run.** Once the date has passed the lifecycle rule has already deleted the target objects, so re-running would re-copy them into a bucket that will expire them again. The pair reports status `expired` and issues no S3 calls. To recover, move the date into the future.
+
+### Advisories
+
+Creation and update return non-blocking warnings rather than failing:
+
+| Code | Meaning |
+|------|---------|
+| `noncurrent-recommended` | Object lock is on but `--noncurrent-expire-days` is unset, so old versions accumulate forever |
+| `retention-past-expiry` | The bucket's default retention outlasts `--target-expire-at`; lifecycle deletion skips still-locked versions |
+| `expiry-cleared` | The pair no longer has an expiry but the old lifecycle rule is still on the bucket |
+
+`--accept-compliance` is required to use a `COMPLIANCE` retention mode, which cannot be undone even by the account root.
 
 ## Configuration
 
 **Credentials:** S3 access/secret keys encrypted at rest with AES-256-GCM. Set `BUCKETSYNC_MASTER_KEY` env var for encryption.
 
-**Target bucket:** On first sync, engine checks if target exists. If not, creates it with source region, enables versioning and object lock if configured.
+**Target bucket:** On first sync, engine checks if target exists. If not, creates it with source region, enables versioning and object lock if configured. If it exists, the preflight verifies lock state and rewrites the lifecycle configuration; mismatches are reported as errors rather than silently ignored.
 
 **Throttling:** Each sync pair sets `max_get_ops_per_minute`. Token bucket limits GET/HEAD ops on source. 0 = unlimited.
 
