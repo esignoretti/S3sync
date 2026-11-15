@@ -76,6 +76,15 @@ with interactive prompts. Run this on a fresh install to get started.`,
 				}
 				p.SourceBucketID = s.SourceBucket.ID
 				p.TargetBucketID = s.TargetBucket.ID
+				// The preflight installed above must run before the pair is
+				// persisted, exactly as on the pair-add and API paths: a pair whose
+				// target cannot be prepared would otherwise be written and then
+				// fail every object on every cycle.
+				if s.Provision != nil {
+					if err := s.Provision(p); err != nil {
+						return fmt.Errorf("sync pair: %w", err)
+					}
+				}
 				if err := repo.CreateSyncPair(p); err != nil {
 					return fmt.Errorf("create sync pair: %w", err)
 				}

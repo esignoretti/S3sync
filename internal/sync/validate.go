@@ -22,8 +22,8 @@ var (
 // block the change. It is returned only on the success path; when validation
 // fails, no warnings are produced.
 type AdvisoryWarning struct {
-	Code    string // "noncurrent-recommended", "retention-past-expiry", "expiry-cleared"
-	Message string
+	Code    string `json:"code"` // "noncurrent-recommended", "retention-past-expiry", "expiry-cleared"
+	Message string `json:"message"`
 }
 
 // ValidatePairOptions checks a pair's attribute and lock settings before they are

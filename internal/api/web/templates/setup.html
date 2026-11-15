@@ -67,8 +67,12 @@
             <div class="form-group" x-show="f.require_object_lock"><label>If the target lacks object lock</label>
                 <select x-model="f.on_lock_missing">
                     <option value="fail">fail</option>
-                    <option value="recreate">recreate the bucket</option>
+                    <option value="recreate">recreate the bucket (destroys its contents)</option>
                 </select>
+            </div>
+            <div class="form-group" x-show="f.require_object_lock && f.on_lock_missing === 'recreate'">
+                <label>Type the target bucket name to allow recreating it</label>
+                <input x-model="f.recreate_confirm" placeholder="target bucket name">
             </div>
             <div class="form-group checkbox" x-show="f.retention_mode === 'COMPLIANCE'"><label><input x-model="f.accept_compliance" type="checkbox"> I accept COMPLIANCE retention (cannot be shortened or bypassed)</label></div>
             <div class="form-group"><label>Attribute reconcile interval, seconds (0 = off)</label><input x-model="f.attrs_reconcile_interval" type="number" min="0"></div>

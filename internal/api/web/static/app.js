@@ -43,6 +43,7 @@ document.addEventListener('alpine:init', () => {
                     on_lock_missing: this.f.on_lock_missing,
                     accept_compliance: this.f.accept_compliance,
                     attrs_reconcile_interval: parseInt(this.f.attrs_reconcile_interval) || 0,
+                    recreate_confirm: this.f.recreate_confirm,
                 };
             }
 
@@ -80,6 +81,7 @@ function defaultForm() {
         noncurrent_expire_days: 0, newer_noncurrent_versions: 0,
         require_object_lock: false, on_lock_missing: 'fail',
         accept_compliance: false, attrs_reconcile_interval: 0,
+        recreate_confirm: '',
     };
 }
 

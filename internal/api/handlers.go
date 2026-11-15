@@ -494,19 +494,33 @@ func (s *Server) setup(c *gin.Context) {
 	// The wizard must run the same preflight as POST /sync-pairs: a pair whose
 	// target lacks the required object lock, or whose expiry date is in the
 	// past, would otherwise be persisted here and fail on every cycle.
-	if state.Provision == nil {
-		state.Provision = func(p *config.SyncPair) error {
-			tgt, err := s.repo.GetBucket(p.TargetBucketID)
-			if err != nil {
-				return fmt.Errorf("get target bucket: %w", err)
-			}
-			if _, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
-				in.AcceptCompliance, true, nil, time.Now().UTC()); err != nil {
-				return err
-			}
-			return sync.ProvisionPair(c.Request.Context(), s.repo, p,
-				sync.ProvisionOptions{Now: time.Now().UTC()})
+	//
+	// Rebuilt on every request rather than once per session: the closure reads
+	// accept_compliance, which only arrives on the final step, so a session-scoped
+	// closure would permanently capture the first request's false and make the
+	// COMPLIANCE checkbox inert.
+	acceptCompliance := in.AcceptCompliance
+	recreateConfirm := in.RecreateConfirm
+	reqCtx := c.Request.Context()
+	state.Provision = func(p *config.SyncPair) error {
+		tgt, err := s.repo.GetBucket(p.TargetBucketID)
+		if err != nil {
+			return fmt.Errorf("get target bucket: %w", err)
 		}
+		if _, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
+			acceptCompliance, true, nil, time.Now().UTC()); err != nil {
+			return err
+		}
+		// Recreating destroys the target bucket, so it needs the operator to
+		// have typed its name. Without this the wizard's recreate option could
+		// only ever fail: nothing else on the web path sets ForceRecreate.
+		forceRecreate := recreateConfirm != "" && recreateConfirm == tgt.BucketName
+		if recreateConfirm != "" && !forceRecreate {
+			return fmt.Errorf("recreate_confirm %q does not match the target bucket name %q",
+				recreateConfirm, tgt.BucketName)
+		}
+		return sync.ProvisionPair(reqCtx, s.repo, p,
+			sync.ProvisionOptions{ForceRecreate: forceRecreate, Now: time.Now().UTC()})
 	}
 
 	if err := state.Apply(s.repo, &in); err != nil {

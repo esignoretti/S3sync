@@ -42,6 +42,11 @@ type SetupState struct {
 	// than a direct call because validation and provisioning live in
 	// internal/sync, which imports this package.
 	Provision func(pair *SyncPair) error
+
+	// RecreateConfirm is the text the operator typed to authorise destroying
+	// an existing target bucket. It is forwarded to Provision, which compares
+	// it against the bucket name; a recreate without an exact match is refused.
+	RecreateConfirm string
 }
 
 func NewSetupState() *SetupState {
@@ -87,6 +92,11 @@ type SetupInput struct {
 	OnLockMissing           string `json:"on_lock_missing,omitempty"`
 	AcceptCompliance        bool   `json:"accept_compliance,omitempty"`
 	AttrsReconcileInterval  int    `json:"attrs_reconcile_interval,omitempty"`
+	// RecreateConfirm must equal the target bucket's name before a
+	// lock-missing recreate is allowed to destroy it. It is checked
+	// server-side because the wizard resets its form between steps and so
+	// cannot reliably compare against the name itself.
+	RecreateConfirm string `json:"recreate_confirm,omitempty"`
 }
 
 func (in *SetupInput) ToBucket() *Bucket {
@@ -192,6 +202,7 @@ func (s *SetupState) Apply(repo *Repository, in *SetupInput) error {
 			return fmt.Errorf("sync pair: %w", err)
 		}
 		p := in.ToSyncPair(s.SourceBucket.Name, s.TargetBucket.Name)
+		s.RecreateConfirm = in.RecreateConfirm
 		// Provision runs before the pair is persisted: a pair whose target
 		// cannot be prepared would otherwise be stored and then fail every
 		// object on every cycle. config cannot import internal/sync, so the

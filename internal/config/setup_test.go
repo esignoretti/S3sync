@@ -147,3 +147,23 @@ func TestSetupApplyRunsProvisionBeforePersisting(t *testing.T) {
 		t.Fatalf("got %d persisted pairs, want 1", len(pairs))
 	}
 }
+
+// The wizard's recreate option is only reachable with a typed bucket name; the
+// name is forwarded on the state so the injected preflight can check it.
+func TestSetupApplyForwardsRecreateConfirm(t *testing.T) {
+	repo, _ := testRepo(t)
+	st := newPairStepState(t, repo)
+
+	var got string
+	st.Provision = func(*SyncPair) error {
+		got = st.RecreateConfirm
+		return nil
+	}
+
+	if err := st.Apply(repo, &SetupInput{PairName: "p", RecreateConfirm: "tgt-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if got != "tgt-b" {
+		t.Errorf("RecreateConfirm = %q, want tgt-b", got)
+	}
+}
