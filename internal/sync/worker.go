@@ -39,6 +39,12 @@ type copyAPI interface {
 // returned unwrapped by retryS3.
 var ErrObjectTooLarge = errors.New("object exceeds the 5 GiB CopyObject limit")
 
+// errObjectVanished reports a source object that disappeared between listing
+// and HEAD. Run treats it as neither success nor failure: an object that was
+// never copied must not reach the cache, or StreamingDiff would consider the
+// key synced and never retry it.
+var errObjectVanished = errors.New("source object vanished")
+
 const maxCopyObjectSize = 5 << 30
 
 func NewWorkerPool(workers int, client *s3.Client, source, target string,
@@ -76,16 +82,16 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 					err = wp.deleteObject(ctx, a)
 				}
 				if err != nil {
-					if !errors.Is(err, context.Canceled) {
+					if !errors.Is(err, context.Canceled) && !errors.Is(err, errObjectVanished) {
 						slog.Error("worker failed", "key", a.Key, "action", a.Type, "error", err)
 					}
 				} else {
 					slog.Info("worker done", "key", a.Key, "action", a.Type, "ms", time.Since(start).Milliseconds())
 				}
-			results <- result{action: a, err: err}
-			if wp.progress != nil {
-				wp.progress.Add(err != nil)
-			}
+				results <- result{action: a, err: err}
+				if wp.progress != nil && !errors.Is(err, errObjectVanished) {
+					wp.progress.Add(err != nil)
+				}
 			}
 		}()
 	}
@@ -98,9 +104,13 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 	var succeeded []SyncAction
 	failed := 0
 	for r := range results {
-		if r.err != nil {
+		switch {
+		case errors.Is(r.err, errObjectVanished):
+			// Skipped: not copied, so neither succeeded nor failed, and never
+			// cached. Counting it either way would lie about the run.
+		case r.err != nil:
 			failed++
-		} else {
+		default:
 			succeeded = append(succeeded, r.action)
 		}
 	}
@@ -146,7 +156,7 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) error {
 	}
 	if vanished {
 		slog.Debug("source object vanished", "key", a.Key)
-		return nil
+		return errObjectVanished
 	}
 
 	if size := aws.ToInt64(headOut.ContentLength); size > maxCopyObjectSize {

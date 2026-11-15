@@ -20,12 +20,13 @@ func TestWorkerPoolCreation(t *testing.T) {
 
 // fakeCopyAPI stands in for both clients of a WorkerPool.
 type fakeCopyAPI struct {
-	copied     int
-	headCalls  int
-	headErr    error
-	headLen    int64
-	headBucket string
-	copyIn     *s3.CopyObjectInput
+	copied       int
+	headCalls    int
+	headErr      error
+	headLen      int64
+	headBucket   string
+	copyIn       *s3.CopyObjectInput
+	deleteBucket string
 }
 
 // testSourceBucket/testTargetBucket are the bucket names newTestWorkerPool uses,
@@ -64,7 +65,8 @@ func (f *fakeCopyAPI) PutObjectTagging(context.Context, *s3.PutObjectTaggingInpu
 	return &s3.PutObjectTaggingOutput{}, nil
 }
 
-func (f *fakeCopyAPI) DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+func (f *fakeCopyAPI) DeleteObject(_ context.Context, in *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	f.deleteBucket = aws.ToString(in.Bucket)
 	return &s3.DeleteObjectOutput{}, nil
 }
 
@@ -121,14 +123,37 @@ func TestCopyObject_HeadsSourceAndCopiesFromIt(t *testing.T) {
 func TestCopyObject_SourceVanishedIsSkipped(t *testing.T) {
 	api := &fakeCopyAPI{headErr: &s3types.NotFound{}}
 	wp := newTestWorkerPool(api)
-	if err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "gone", ETag: `"e1"`}); err != nil {
-		t.Fatalf("copyObject returned %v; a vanished source is skipped, not failed", err)
+	err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "gone", ETag: `"e1"`})
+	if !errors.Is(err, errObjectVanished) {
+		t.Fatalf("copyObject returned %v; a vanished source must report errObjectVanished", err)
 	}
 	if api.copied != 0 {
 		t.Fatalf("CopyObject called %d times, want 0", api.copied)
 	}
 	if api.headCalls != 1 {
 		t.Fatalf("HeadObject called %d times, want 1 (a 404 must not be retried)", api.headCalls)
+	}
+}
+
+// A vanished object was never copied, so it must not be reported as synced and
+// must not reach the cache: caching it would make StreamingDiff skip the key
+// forever if the object came back with an unchanged ETag and LastModified.
+func TestWorkerPoolRun_VanishedObjectIsNeitherSucceededNorFailed(t *testing.T) {
+	api := &fakeCopyAPI{headErr: &s3types.NotFound{}}
+	wp := newTestWorkerPool(api)
+	actions := make(chan SyncAction, 1)
+	actions <- SyncAction{Type: ActionCopy, Key: "gone", ETag: `"e1"`}
+	close(actions)
+
+	succeeded, succeededCount, failed := wp.Run(context.Background(), actions)
+	if succeededCount != 0 || len(succeeded) != 0 {
+		t.Fatalf("succeeded = %d (%d actions), want 0: a skipped object was never copied", succeededCount, len(succeeded))
+	}
+	if failed != 0 {
+		t.Fatalf("failed = %d, want 0: a vanished object is a skip, not a failure", failed)
+	}
+	if api.copied != 0 {
+		t.Fatalf("CopyObject called %d times, want 0", api.copied)
 	}
 }
 
@@ -141,11 +166,66 @@ func TestCopyObject_SourceHeadErrorIsRetriedAndFails(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want it to wrap the HEAD failure", err)
 	}
+	if errors.Is(err, errObjectVanished) {
+		t.Fatalf("err = %v; a genuine HEAD failure must not look like a vanished object", err)
+	}
 	if api.headCalls != 3 {
 		t.Fatalf("HeadObject called %d times, want 3 attempts", api.headCalls)
 	}
 	if api.copied != 0 {
 		t.Fatalf("CopyObject called %d times, want 0", api.copied)
+	}
+}
+
+// Pins the accounting split at the Run level: a too-large object is a failure,
+// a vanished one is neither.
+func TestWorkerPoolRun_TooLargeObjectIsFailed(t *testing.T) {
+	api := &fakeCopyAPI{headLen: 6 << 30}
+	wp := newTestWorkerPool(api)
+	actions := make(chan SyncAction, 1)
+	actions <- SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`}
+	close(actions)
+
+	succeeded, succeededCount, failed := wp.Run(context.Background(), actions)
+	if failed != 1 {
+		t.Fatalf("failed = %d, want 1", failed)
+	}
+	if succeededCount != 0 || len(succeeded) != 0 {
+		t.Fatalf("succeeded = %d (%d actions), want 0", succeededCount, len(succeeded))
+	}
+}
+
+// A genuine (non-NotFound) HEAD failure must reach the failed count.
+func TestWorkerPoolRun_HeadErrorIsFailed(t *testing.T) {
+	api := &fakeCopyAPI{headErr: errors.New("connection reset")}
+	wp := newTestWorkerPool(api)
+	actions := make(chan SyncAction, 1)
+	actions <- SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`}
+	close(actions)
+
+	succeeded, succeededCount, failed := wp.Run(context.Background(), actions)
+	if failed != 1 {
+		t.Fatalf("failed = %d, want 1", failed)
+	}
+	if succeededCount != 0 || len(succeeded) != 0 {
+		t.Fatalf("succeeded = %d (%d actions), want 0", succeededCount, len(succeeded))
+	}
+}
+
+// Deletes always go to the target bucket, never the source.
+func TestWorkerPoolRun_DeleteRoutesToTarget(t *testing.T) {
+	api := &fakeCopyAPI{}
+	wp := newTestWorkerPool(api)
+	actions := make(chan SyncAction, 1)
+	actions <- SyncAction{Type: ActionDelete, Key: "old"}
+	close(actions)
+
+	_, succeededCount, failed := wp.Run(context.Background(), actions)
+	if failed != 0 || succeededCount != 1 {
+		t.Fatalf("Run: succeeded %d, failed %d; want 1 succeeded and 0 failed", succeededCount, failed)
+	}
+	if api.deleteBucket != testTargetBucket {
+		t.Fatalf("DeleteObject called on bucket %q, want %q", api.deleteBucket, testTargetBucket)
 	}
 }
 
