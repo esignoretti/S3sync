@@ -3,6 +3,7 @@ package sync
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/esignoretti/S3sync/internal/config"
@@ -18,8 +19,8 @@ var (
 )
 
 // AdvisoryWarning is a condition worth telling the operator about that must not
-// block the change. It is returned alongside the error so a caller can print
-// warnings even on the paths that fail.
+// block the change. It is returned only on the success path; when validation
+// fails, no warnings are produced.
 type AdvisoryWarning struct {
 	Code    string // "noncurrent-recommended", "retention-past-expiry", "expiry-cleared"
 	Message string
@@ -47,7 +48,10 @@ func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionD
 
 	// COMPLIANCE retention cannot be shortened or bypassed by anyone, including
 	// the operator, so accepting it is a decision that has to be deliberate.
-	if retentionMode == "COMPLIANCE" && !acceptCompliance {
+	// Compared case-insensitively: the bucket CLI stores whatever the operator
+	// typed, so "compliance" is reachable and would otherwise slip past the gate
+	// while still being sent to the endpoint verbatim.
+	if strings.EqualFold(retentionMode, "COMPLIANCE") && !acceptCompliance {
 		return nil, fmt.Errorf("%w: COMPLIANCE retention cannot be shortened or bypassed, "+
 			"not even by an administrator; pass --accept-compliance to proceed", ErrComplianceNeedsConfirm)
 	}

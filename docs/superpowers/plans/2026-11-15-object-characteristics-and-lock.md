@@ -990,7 +990,7 @@ git commit -m "feat(sync): expired-pair guard, pending-attrs counter, provisioni
 
 **Interfaces:**
 - Consumes: `ProvisionTarget` (Task 3), `ValidateExpireAt` (Task 2), `config.SyncPair` fields (Task 1).
-- Produces: `func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error` in `internal/sync/run.go`; `func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)` and `type AdvisoryWarning struct { Code, Message string }` in `internal/sync/provision.go`.
+- Produces: `func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error` in `internal/sync/run.go`; `func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionDays int, acceptCompliance, confirmExpireEarlier bool, previousExpireAt *time.Time, now time.Time) ([]AdvisoryWarning, error)` and `type AdvisoryWarning struct { Code, Message string }` in `internal/sync/validate.go`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1068,7 +1068,7 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 
 	t.Run("retention past expiry warns", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &expire}
-		warns, err := ValidatePairOptions(p, "COMPLIANCE", 30, true, false, nil, now)
+		warns, err := ValidatePairOptions(p, "COMPLIANCE", 200, true, false, nil, now)
 		if err != nil { t.Fatalf("err = %v", err) }
 		if !hasCode(warns, "retention-past-expiry") { t.Fatalf("warnings = %v", warns) }
 	})

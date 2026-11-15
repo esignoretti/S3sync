@@ -208,7 +208,7 @@ var pairUpdateCmd = &cobra.Command{
 		printWarnings(warns)
 
 		if err := sync.ProvisionPair(cmd.Context(), repo, p,
-			sync.ProvisionOptions{ForceRecreate: true, Now: time.Now().UTC()}); err != nil {
+			sync.ProvisionOptions{ForceRecreate: false, Now: time.Now().UTC()}); err != nil {
 			return fmt.Errorf("provision target: %w", err)
 		}
 
@@ -241,15 +241,19 @@ func applyPairFlags(cmd *cobra.Command, p *config.SyncPair, create bool) error {
 			p.TargetExpireAt = &t
 		}
 	}
+	// The noncurrent-version rules are regenerated wholesale by
+	// BuildLifecycleRules and applyLifecycle rewrites the lifecycle config, so
+	// they are safe to change after creation. They must be: the
+	// noncurrent-recommended warning fires on update and advises this flag.
+	if cmd.Flags().Changed("noncurrent-expire-days") {
+		v, _ := cmd.Flags().GetInt("noncurrent-expire-days")
+		p.NoncurrentExpireDays = v
+	}
+	if cmd.Flags().Changed("newer-noncurrent-versions") {
+		v, _ := cmd.Flags().GetInt("newer-noncurrent-versions")
+		p.NewerNoncurrentVersions = v
+	}
 	if create {
-		if cmd.Flags().Changed("noncurrent-expire-days") {
-			v, _ := cmd.Flags().GetInt("noncurrent-expire-days")
-			p.NoncurrentExpireDays = v
-		}
-		if cmd.Flags().Changed("newer-noncurrent-versions") {
-			v, _ := cmd.Flags().GetInt("newer-noncurrent-versions")
-			p.NewerNoncurrentVersions = v
-		}
 		if cmd.Flags().Changed("require-object-lock") {
 			v, _ := cmd.Flags().GetBool("require-object-lock")
 			p.RequireObjectLock = v
@@ -333,6 +337,8 @@ func init() {
 	pairUpdateCmd.Flags().Bool("replicate-attributes", false, "Replicate object metadata, tags, retention and legal hold")
 	pairUpdateCmd.Flags().Int("attrs-reconcile-interval", 0, "Seconds between attribute drift sweeps (0=off)")
 	pairUpdateCmd.Flags().String("target-expire-at", "", "Expire the target bucket's objects at this date (YYYY-MM-DD); empty clears it")
+	pairUpdateCmd.Flags().Int("noncurrent-expire-days", 0, "Delete noncurrent versions after this many days")
+	pairUpdateCmd.Flags().Int("newer-noncurrent-versions", 0, "Keep this many noncurrent versions regardless of age")
 	pairUpdateCmd.Flags().Bool("confirm-expire-earlier", false, "Confirm moving the target expiry date earlier")
 	pairUpdateCmd.Flags().Bool("accept-compliance", false, "Accept COMPLIANCE retention, which cannot be shortened or bypassed")
 	pairUpdateCmd.Flags().Bool("require-object-lock", false, "Not settable after creation (rejected)")

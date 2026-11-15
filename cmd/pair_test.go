@@ -28,6 +28,16 @@ func TestValidatePairOptions(t *testing.T) {
 		}
 	})
 
+	// The bucket CLI stores whatever the operator typed, so a lowercase mode
+	// reaches validation verbatim. Comparing case-sensitively would let it
+	// through the gate while still being sent to the endpoint unchanged.
+	t.Run("compliance is matched case-insensitively", func(t *testing.T) {
+		_, err := sync.ValidatePairOptions(&config.SyncPair{}, "compliance", 0, false, false, nil, now)
+		if !errors.Is(err, sync.ErrComplianceNeedsConfirm) {
+			t.Fatalf("err = %v, want ErrComplianceNeedsConfirm", err)
+		}
+	})
+
 	t.Run("past expiry rejected", func(t *testing.T) {
 		p := &config.SyncPair{TargetExpireAt: &past}
 		_, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, now)
