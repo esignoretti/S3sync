@@ -35,6 +35,14 @@ document.addEventListener('alpine:init', () => {
                     max_get_ops_per_minute: parseInt(this.f.max_get_ops_per_minute) || 600,
                     delete_propagation: this.f.delete_propagation,
                     target_storage_class: this.f.target_storage_class,
+                    replicate_attributes: this.f.replicate_attributes,
+                    target_expire_at: this.f.target_expire_at,
+                    noncurrent_expire_days: parseInt(this.f.noncurrent_expire_days) || 0,
+                    newer_noncurrent_versions: parseInt(this.f.newer_noncurrent_versions) || 0,
+                    require_object_lock: this.f.require_object_lock,
+                    on_lock_missing: this.f.on_lock_missing,
+                    accept_compliance: this.f.accept_compliance,
+                    attrs_reconcile_interval: parseInt(this.f.attrs_reconcile_interval) || 0,
                 };
             }
 
@@ -68,6 +76,10 @@ function defaultForm() {
         pair_name: '', sync_interval: 300, worker_count: 10,
         max_get_ops_per_minute: 600, delete_propagation: true,
         target_storage_class: '',
+        replicate_attributes: false, target_expire_at: '',
+        noncurrent_expire_days: 0, newer_noncurrent_versions: 0,
+        require_object_lock: false, on_lock_missing: 'fail',
+        accept_compliance: false, attrs_reconcile_interval: 0,
     };
 }
 
@@ -127,6 +139,36 @@ async function pollStatus() {
             let h2 = header.appendChild(document.createElement('h2'));
             txt(h2, p.name);
 
+            // Badges: the settings that change what the target bucket does are
+            // worth seeing without opening the edit modal.
+            function addBadge(label, title, cls) {
+                let b = header.appendChild(document.createElement('span'));
+                b.className = 'badge' + (cls ? ' ' + cls : '');
+                b.textContent = label;
+                if (title) b.title = title;
+                return b;
+            }
+            if (p.require_object_lock) {
+                addBadge('lock', 'Object lock is required on the target bucket');
+            }
+            if (p.replicate_attributes) {
+                addBadge('attrs', 'Object metadata, tags, retention and legal hold are replicated');
+            }
+            if (p.target_expire_at) {
+                let when = new Date(p.target_expire_at);
+                addBadge('expires ' + when.toISOString().slice(0, 10),
+                    'The target bucket expires every object at this date', p.expired ? 'badge-danger' : '');
+            }
+            if (p.attrs_pending > 0) {
+                addBadge(p.attrs_pending + ' attrs pending',
+                    'Objects whose characteristics were only partially applied; the next cycle retries them',
+                    'badge-warn');
+            }
+            if (p.expired) {
+                addBadge('expired', 'The target expiry date has passed; this pair will not run until it is moved forward',
+                    'badge-danger');
+            }
+
             let editBtn = header.appendChild(document.createElement('button'));
             editBtn.className = 'btn btn-sm btn-secondary header-edit';
             editBtn.textContent = 'Edit';
@@ -138,7 +180,11 @@ async function pollStatus() {
             editBtn.dataset.webhookUrl = p.webhook_url || '';
             editBtn.dataset.webhookEvents = p.webhook_events || '';
             editBtn.dataset.dryRun = p.dry_run || false;
-            editBtn.addEventListener('click', () => openEditModal(editBtn.dataset.id, editBtn.dataset.interval, editBtn.dataset.workers, editBtn.dataset.maxOps, editBtn.dataset.webhookUrl, editBtn.dataset.webhookEvents, editBtn.dataset.dryRun));
+            editBtn.dataset.replicateAttributes = p.replicate_attributes || false;
+            editBtn.dataset.attrsReconcileInterval = p.attrs_reconcile_interval || 0;
+            editBtn.dataset.targetExpireAt = p.target_expire_at ? p.target_expire_at.slice(0, 10) : '';
+            editBtn.dataset.targetBucket = p.target_bucket || '';
+            editBtn.addEventListener('click', () => openEditModal(editBtn.dataset));
 
             // Stats
             let stats = card.appendChild(document.createElement('div'));
@@ -234,14 +280,23 @@ async function pollStatus() {
 }
 
 let editPairId = null;
-function openEditModal(pairId, interval, workers, maxOps, webhookUrl, webhookEvents, dryRun) {
-    editPairId = pairId;
-    document.getElementById('edit-interval').value = interval || '';
-    document.getElementById('edit-workers').value = workers || '';
-    document.getElementById('edit-max-ops').value = maxOps || '';
-    document.getElementById('edit-webhook-url').value = webhookUrl || '';
-    document.getElementById('edit-webhook-events').value = webhookEvents || '';
-    document.getElementById('edit-dry-run').checked = dryRun === 'true';
+// editState keeps the values the confirmations compare against: the expiry the
+// pair has now, and the target bucket name a recreate must be spelled out.
+let editState = { previousExpireAt: '', targetBucket: '' };
+function openEditModal(d) {
+    editPairId = d.id;
+    editState.previousExpireAt = d.targetExpireAt || '';
+    editState.targetBucket = d.targetBucket || '';
+    document.getElementById('edit-interval').value = d.interval || '';
+    document.getElementById('edit-workers').value = d.workers || '';
+    document.getElementById('edit-max-ops').value = d.maxOps || '';
+    document.getElementById('edit-webhook-url').value = d.webhookUrl || '';
+    document.getElementById('edit-webhook-events').value = d.webhookEvents || '';
+    document.getElementById('edit-dry-run').checked = d.dryRun === 'true';
+    document.getElementById('edit-replicate-attributes').checked = d.replicateAttributes === 'true';
+    document.getElementById('edit-attrs-reconcile-interval').value = d.attrsReconcileInterval || '';
+    document.getElementById('edit-target-expire-at').value = d.targetExpireAt || '';
+    document.getElementById('edit-accept-compliance').checked = false;
     document.getElementById('edit-modal').style.display = 'flex';
 }
 function closeEditModal() {
@@ -255,7 +310,30 @@ async function saveEdit() {
     let webhookUrl = document.getElementById('edit-webhook-url').value;
     let webhookEvents = document.getElementById('edit-webhook-events').value;
     let dryRun = document.getElementById('edit-dry-run').checked;
+    let replicateAttributes = document.getElementById('edit-replicate-attributes').checked;
+    let attrsInterval = parseInt(document.getElementById('edit-attrs-reconcile-interval').value);
+    let expireAt = document.getElementById('edit-target-expire-at').value;
+    let acceptCompliance = document.getElementById('edit-accept-compliance').checked;
+
+    // Moving the expiry earlier deletes data sooner than promised, so it takes an
+    // explicit confirmation that names both dates. The server enforces the same
+    // rule; this is the readable version of it.
+    let confirmEarlier = false;
+    if (expireAt && editState.previousExpireAt && expireAt < editState.previousExpireAt) {
+        confirmEarlier = confirm(
+            'Move the target expiry earlier?\n\n' +
+            'from: ' + editState.previousExpireAt + '\n' +
+            'to:   ' + expireAt + '\n\n' +
+            'Objects already copied will be deleted sooner than planned.');
+        if (!confirmEarlier) return;
+    }
+
     let body = {};
+    body.replicate_attributes = replicateAttributes;
+    body.accept_compliance = acceptCompliance;
+    body.confirm_expire_earlier = confirmEarlier;
+    body.target_expire_at = expireAt;
+    if (!isNaN(attrsInterval)) body.attrs_reconcile_interval = attrsInterval;
     if (!isNaN(interval)) body.sync_interval = interval;
     if (!isNaN(workers)) body.worker_count = workers;
     if (!isNaN(maxOps)) body.max_get_ops_per_minute = maxOps;
@@ -263,12 +341,24 @@ async function saveEdit() {
     if (webhookEvents) body.webhook_events = webhookEvents;
     body.dry_run = dryRun;
     try {
-        await fetch('/api/sync-pairs/' + editPairId, {
+        let res = await fetch('/api/sync-pairs/' + editPairId, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
-    } catch(e) {}
+        let json = await res.json();
+        if (!res.ok) {
+            // Closing on failure would leave the operator believing the change
+            // was saved when the preflight refused it.
+            alert((json.error || 'Update failed') + warningsText(json.warnings));
+            return;
+        }
+        let warns = warningsText(json.warnings);
+        if (warns) alert(warns);
+    } catch(e) {
+        alert('Network error');
+        return;
+    }
     closeEditModal();
     pollStatus();
 }
@@ -315,3 +405,11 @@ document.addEventListener('DOMContentLoaded', () => {
         setInterval(pollStatus, 5000);
     }
 });
+
+// warningsText renders advisory warnings from a create/update response. They are
+// never errors: the change succeeded, but something about it will surprise the
+// operator later.
+function warningsText(warnings) {
+    if (!warnings || warnings.length === 0) return '';
+    return '\n\nWarnings:\n' + warnings.map(w => '- ' + w.message).join('\n');
+}

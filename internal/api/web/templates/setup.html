@@ -59,6 +59,19 @@
             <div class="form-group"><label>Max GET ops/min</label><input x-model="f.max_get_ops_per_minute" type="number" value="600"></div>
             <div class="form-group checkbox"><label><input x-model="f.delete_propagation" type="checkbox"> Delete propagation</label></div>
             <div class="form-group"><label>Storage class (opt)</label><input x-model="f.target_storage_class" placeholder="STANDARD_IA"></div>
+            <div class="form-group checkbox"><label><input x-model="f.replicate_attributes" type="checkbox"> Replicate object characteristics (metadata, tags, retention, legal hold)</label></div>
+            <div class="form-group"><label>Expire target on (opt, YYYY-MM-DD)</label><input x-model="f.target_expire_at" type="date"></div>
+            <div class="form-group"><label>Noncurrent expire days (0 = keep)</label><input x-model="f.noncurrent_expire_days" type="number" min="0"></div>
+            <div class="form-group"><label>Noncurrent versions to keep (opt)</label><input x-model="f.newer_noncurrent_versions" type="number" min="0"></div>
+            <div class="form-group checkbox"><label><input x-model="f.require_object_lock" type="checkbox"> Require object lock on the target</label></div>
+            <div class="form-group" x-show="f.require_object_lock"><label>If the target lacks object lock</label>
+                <select x-model="f.on_lock_missing">
+                    <option value="fail">fail</option>
+                    <option value="recreate">recreate the bucket</option>
+                </select>
+            </div>
+            <div class="form-group checkbox" x-show="f.retention_mode === 'COMPLIANCE'"><label><input x-model="f.accept_compliance" type="checkbox"> I accept COMPLIANCE retention (cannot be shortened or bypassed)</label></div>
+            <div class="form-group"><label>Attribute reconcile interval, seconds (0 = off)</label><input x-model="f.attrs_reconcile_interval" type="number" min="0"></div>
             <div class="form-actions">
                 <button class="btn btn-secondary" @click="step=2">Back</button>
                 <button class="btn btn-primary" :disabled="loading" @click="submit('pair')"><span x-text="loading ? 'Saving...' : 'Complete'"></span></button>

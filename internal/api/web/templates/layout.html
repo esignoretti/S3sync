@@ -39,6 +39,14 @@
                 <input type="text" id="edit-webhook-events" placeholder="error">
             </label>
             <label class="checkbox-label"><input type="checkbox" id="edit-dry-run"> Dry run (preview only)</label>
+            <label class="checkbox-label"><input type="checkbox" id="edit-replicate-attributes"> Replicate object characteristics (metadata, tags, retention, legal hold)</label>
+            <label>Attribute reconcile interval (s, 0 = off)
+                <input type="number" id="edit-attrs-reconcile-interval" min="0" step="60">
+            </label>
+            <label>Expire target on (empty = no expiry)
+                <input type="date" id="edit-target-expire-at">
+            </label>
+            <label class="checkbox-label"><input type="checkbox" id="edit-accept-compliance"> Accept COMPLIANCE retention (cannot be shortened or bypassed)</label>
             <div class="modal-actions">
                 <button class="btn btn-sm btn-secondary" onclick="closeEditModal()">Cancel</button>
                 <button class="btn btn-sm btn-primary" onclick="saveEdit()">Save</button>

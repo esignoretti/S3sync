@@ -1,19 +1,24 @@
 package api
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/esignoretti/S3sync/internal/sync"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type apiResponse struct {
 	Data  interface{} `json:"data,omitempty"`
 	Error string      `json:"error,omitempty"`
+	// Code is a stable machine-readable discriminator for errors a client may
+	// want to branch on, e.g. "preflight_failed" for a rejected pair.
+	Code     string                 `json:"code,omitempty"`
+	Warnings []sync.AdvisoryWarning `json:"warnings,omitempty"`
 }
 
 func respond(c *gin.Context, status int, data interface{}) {
@@ -22,6 +27,11 @@ func respond(c *gin.Context, status int, data interface{}) {
 
 func respondError(c *gin.Context, status int, msg string) {
 	c.JSON(status, apiResponse{Error: msg})
+}
+
+// respondErrorCode reports an error with a stable code a client can branch on.
+func respondErrorCode(c *gin.Context, status int, code, msg string) {
+	c.JSON(status, apiResponse{Error: msg, Code: code})
 }
 
 // --- Buckets ---
@@ -85,20 +95,53 @@ func (s *Server) deleteBucket(c *gin.Context) {
 // --- Sync Pairs ---
 
 func (s *Server) createSyncPair(c *gin.Context) {
-	var p config.SyncPair
-	if err := c.ShouldBindJSON(&p); err != nil {
+	var in struct {
+		config.SyncPair
+		AcceptCompliance bool `json:"accept_compliance"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	p := in.SyncPair
+
+	tgt, err := s.repo.GetBucket(p.TargetBucketID)
+	if err != nil {
+		respondErrorCode(c, http.StatusBadRequest, "preflight_failed",
+			"get target bucket: "+err.Error())
+		return
+	}
+
+	warns, err := sync.ValidatePairOptions(&p, tgt.RetentionMode, tgt.RetentionDays,
+		in.AcceptCompliance, true, nil, time.Now().UTC())
+	if err != nil {
+		respondErrorCode(c, http.StatusUnprocessableEntity, "preflight_failed", err.Error())
+		return
+	}
+
+	// Provision before persisting: a pair whose target cannot be prepared would
+	// otherwise be stored and then fail every object on every cycle.
+	if err := sync.ProvisionPair(c.Request.Context(), s.repo, &p,
+		sync.ProvisionOptions{Now: time.Now().UTC()}); err != nil {
+		respondErrorCode(c, http.StatusUnprocessableEntity, "preflight_failed", err.Error())
+		return
+	}
+
 	if err := s.repo.CreateSyncPair(&p); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respond(c, http.StatusCreated, p)
+	c.JSON(http.StatusCreated, apiResponse{Data: p, Warnings: warns})
 }
 
 type syncPairResponse struct {
 	config.SyncPair
+	// PendingAttrs is how many objects in the last run completed with their
+	// characteristics only partially applied.
+	PendingAttrs int `json:"attrs_pending"`
+	// Expired marks a pair whose target expiry date has passed: the engine
+	// refuses to run it, so the UI can say why instead of showing a failure.
+	Expired      bool           `json:"expired"`
 	SourceBucket string         `json:"source_bucket"`
 	TargetBucket string         `json:"target_bucket"`
 	SourceName   string         `json:"source_name"`
@@ -110,14 +153,20 @@ type syncPairResponse struct {
 	LastError    string         `json:"last_error"`
 }
 
-func enrichPair(repo *config.Repository, p config.SyncPair) syncPairResponse {
+func (s *Server) enrichPair(p config.SyncPair) syncPairResponse {
 	r := syncPairResponse{SyncPair: p}
-	if src, err := repo.GetBucket(p.SourceBucketID); err == nil {
+	if p.TargetExpireAt != nil && time.Now().UTC().After(*p.TargetExpireAt) {
+		r.Expired = true
+	}
+	if eng, ok := s.GetEngine(p.ID); ok {
+		r.PendingAttrs = eng.PendingAttrs()
+	}
+	if src, err := s.repo.GetBucket(p.SourceBucketID); err == nil {
 		r.SourceBucket = src.BucketName
 		r.SourceName = src.Name
 		r.SourceURL = src.Endpoint + "/" + src.BucketName
 	}
-	if tgt, err := repo.GetBucket(p.TargetBucketID); err == nil {
+	if tgt, err := s.repo.GetBucket(p.TargetBucketID); err == nil {
 		r.TargetBucket = tgt.BucketName
 		r.TargetName = tgt.Name
 		r.TargetURL = tgt.Endpoint + "/" + tgt.BucketName
@@ -136,7 +185,7 @@ func (s *Server) listSyncPairs(c *gin.Context) {
 	}
 	resp := make([]syncPairResponse, len(pairs))
 	for i, p := range pairs {
-		r := enrichPair(s.repo, p)
+		r := s.enrichPair(p)
 		if eng, ok := s.GetEngine(p.ID); ok {
 			running, lastRun, status, lastError, prog := eng.Status()
 			r.Running = running
@@ -165,12 +214,21 @@ func (s *Server) getSyncPair(c *gin.Context) {
 func (s *Server) updateSyncPair(c *gin.Context) {
 	id := c.Param("id")
 	var in struct {
-		SyncInterval       *int    `json:"sync_interval"`
-		WorkerCount        *int    `json:"worker_count"`
-		MaxGetOpsPerMinute *int    `json:"max_get_ops_per_minute"`
-		WebhookURL         *string `json:"webhook_url"`
-		WebhookEvents      *string `json:"webhook_events"`
-		DryRun             *bool   `json:"dry_run"`
+		SyncInterval           *int    `json:"sync_interval"`
+		WorkerCount            *int    `json:"worker_count"`
+		MaxGetOpsPerMinute     *int    `json:"max_get_ops_per_minute"`
+		WebhookURL             *string `json:"webhook_url"`
+		WebhookEvents          *string `json:"webhook_events"`
+		DryRun                 *bool   `json:"dry_run"`
+		ReplicateAttributes    *bool   `json:"replicate_attributes"`
+		AttrsReconcileInterval *int    `json:"attrs_reconcile_interval"`
+		TargetExpireAt         *string `json:"target_expire_at"`
+		ConfirmExpireEarlier   *bool   `json:"confirm_expire_earlier"`
+		AcceptCompliance       *bool   `json:"accept_compliance"`
+		// Lock settings are rejected when present: they can only be chosen when
+		// the bucket is created, so accepting them here would be a silent no-op.
+		RequireObjectLock *bool   `json:"require_object_lock"`
+		OnLockMissing     *string `json:"on_lock_missing"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		respondError(c, http.StatusBadRequest, err.Error())
@@ -199,11 +257,76 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 	if in.DryRun != nil {
 		p.DryRun = *in.DryRun
 	}
+	if in.RequireObjectLock != nil || in.OnLockMissing != nil {
+		respondError(c, http.StatusBadRequest,
+			"require_object_lock and on_lock_missing cannot be changed after pair creation: "+
+				"object lock can only be enabled when a bucket is created")
+		return
+	}
+
+	previousExpireAt := p.TargetExpireAt
+	if in.ReplicateAttributes != nil {
+		p.ReplicateAttributes = *in.ReplicateAttributes
+	}
+	if in.AttrsReconcileInterval != nil {
+		p.AttrsReconcileInterval = *in.AttrsReconcileInterval
+	}
+	if in.TargetExpireAt != nil {
+		t, err := parseExpireAt(*in.TargetExpireAt)
+		if err != nil {
+			respondError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		p.TargetExpireAt = t
+	}
+
+	tgt, err := s.repo.GetBucket(p.TargetBucketID)
+	if err != nil {
+		respondErrorCode(c, http.StatusBadRequest, "preflight_failed",
+			"get target bucket: "+err.Error())
+		return
+	}
+	acceptCompliance := in.AcceptCompliance != nil && *in.AcceptCompliance
+	confirmEarlier := in.ConfirmExpireEarlier != nil && *in.ConfirmExpireEarlier
+	warns, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
+		acceptCompliance, confirmEarlier, previousExpireAt, time.Now().UTC())
+	if err != nil {
+		respondErrorCode(c, http.StatusUnprocessableEntity, "preflight_failed", err.Error())
+		return
+	}
+
+	// An expiry change only takes effect once the lifecycle rule is rewritten, so
+	// the same preflight runs here. ForceRecreate is set because ProvisionTarget
+	// only ever deletes a bucket for a lock-recreate, and the lock fields are
+	// immutable after creation, so no update can reach that branch.
+	if err := sync.ProvisionPair(c.Request.Context(), s.repo, p,
+		sync.ProvisionOptions{ForceRecreate: true, Now: time.Now().UTC()}); err != nil {
+		respondErrorCode(c, http.StatusUnprocessableEntity, "preflight_failed", err.Error())
+		return
+	}
+
 	if err := s.repo.UpdateSyncPair(p); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respond(c, http.StatusOK, p)
+	c.JSON(http.StatusOK, apiResponse{Data: p, Warnings: warns})
+}
+
+// parseExpireAt accepts an empty string (meaning "no expiry"), an RFC3339
+// timestamp, or a bare YYYY-MM-DD date. A date with no time is midnight UTC,
+// which is the only form S3 accepts for a lifecycle Expiration.Date.
+func parseExpireAt(raw string) (*time.Time, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return &t, nil
+	}
+	t, err := time.Parse("2006-01-02", raw)
+	if err != nil {
+		return nil, fmt.Errorf("target_expire_at %q: want RFC3339 or YYYY-MM-DD: %w", raw, err)
+	}
+	return &t, nil
 }
 
 func (s *Server) deleteSyncPair(c *gin.Context) {
@@ -368,6 +491,23 @@ func (s *Server) setup(c *gin.Context) {
 	}
 
 	state := s.GetOrCreateSetupState(sessionID)
+	// The wizard must run the same preflight as POST /sync-pairs: a pair whose
+	// target lacks the required object lock, or whose expiry date is in the
+	// past, would otherwise be persisted here and fail on every cycle.
+	if state.Provision == nil {
+		state.Provision = func(p *config.SyncPair) error {
+			tgt, err := s.repo.GetBucket(p.TargetBucketID)
+			if err != nil {
+				return fmt.Errorf("get target bucket: %w", err)
+			}
+			if _, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
+				in.AcceptCompliance, true, nil, time.Now().UTC()); err != nil {
+				return err
+			}
+			return sync.ProvisionPair(c.Request.Context(), s.repo, p,
+				sync.ProvisionOptions{Now: time.Now().UTC()})
+		}
+	}
 
 	if err := state.Apply(s.repo, &in); err != nil {
 		state.Error = err.Error()
