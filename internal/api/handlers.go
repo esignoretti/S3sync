@@ -296,11 +296,11 @@ func (s *Server) updateSyncPair(c *gin.Context) {
 	}
 
 	// An expiry change only takes effect once the lifecycle rule is rewritten, so
-	// the same preflight runs here. ForceRecreate is set because ProvisionTarget
-	// only ever deletes a bucket for a lock-recreate, and the lock fields are
-	// immutable after creation, so no update can reach that branch.
+	// the same preflight runs here. ForceRecreate stays false: an update has no
+	// legitimate reason to destroy a target bucket, and leaving it false makes
+	// ProvisionTarget report ErrLockMissing instead of deleting anything.
 	if err := sync.ProvisionPair(c.Request.Context(), s.repo, p,
-		sync.ProvisionOptions{ForceRecreate: true, Now: time.Now().UTC()}); err != nil {
+		sync.ProvisionOptions{ForceRecreate: false, Now: time.Now().UTC()}); err != nil {
 		respondErrorCode(c, http.StatusUnprocessableEntity, "preflight_failed", err.Error())
 		return
 	}
