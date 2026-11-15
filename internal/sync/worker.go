@@ -58,14 +58,42 @@ func NewWorkerPool(workers int, srcClient, tgtClient *s3.Client, source, target 
 	}
 }
 
+// workerResult is one finished action: the action as the worker left it (which
+// may carry a fingerprint and a pending mark) plus its error.
+type workerResult struct {
+	action SyncAction
+	err    error
+}
+
+// tally folds one result into the run's counts and the progress meters. It lives
+// outside the loop because a pending action is only distinguishable from a clean
+// one by the flag on the result: its bytes were copied but its characteristics
+// were not fully applied. That is completed work, which is why AddPending also
+// bumps Completed, and it is why the count cannot happen in the worker.
+func (wp *WorkerPool) tally(succeeded *[]SyncAction, failed *int, r workerResult) {
+	switch {
+	case errors.Is(r.err, errObjectVanished):
+		// Skipped: not copied, so neither succeeded nor failed, and never
+		// cached. Counting it either way would lie about the run.
+		return
+	case r.err != nil:
+		*failed++
+	default:
+		*succeeded = append(*succeeded, r.action)
+	}
+	if wp.progress == nil {
+		return
+	}
+	if r.err == nil && r.action.PendingAttrs {
+		wp.progress.AddPending()
+		return
+	}
+	wp.progress.Add(r.err != nil)
+}
+
 // Run reads actions from the channel until it is closed.
 func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]SyncAction, int, int) {
-	type result struct {
-		action SyncAction
-		err    error
-	}
-
-	results := make(chan result)
+	results := make(chan workerResult)
 	var wg sync.WaitGroup
 
 	workerCount := wp.workers
@@ -94,10 +122,7 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 				} else {
 					slog.Info("worker done", "key", a.Key, "action", a.Type, "ms", time.Since(start).Milliseconds())
 				}
-				results <- result{action: out, err: err}
-				if wp.progress != nil && !errors.Is(err, errObjectVanished) {
-					wp.progress.Add(err != nil)
-				}
+				results <- workerResult{action: out, err: err}
 			}
 		}()
 	}
@@ -110,15 +135,7 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 	var succeeded []SyncAction
 	failed := 0
 	for r := range results {
-		switch {
-		case errors.Is(r.err, errObjectVanished):
-			// Skipped: not copied, so neither succeeded nor failed, and never
-			// cached. Counting it either way would lie about the run.
-		case r.err != nil:
-			failed++
-		default:
-			succeeded = append(succeeded, r.action)
-		}
+		wp.tally(&succeeded, &failed, r)
 	}
 
 	return succeeded, len(succeeded), failed
@@ -310,9 +327,34 @@ func (wp *WorkerPool) copyBytes(ctx context.Context, key string, attrs ObjectAtt
 		return err
 	}, 3)
 	if err != nil {
-		return nil, err
+		return nil, wp.explainCopyError(key, attrs, err)
 	}
 	return copyOut, nil
+}
+
+// carriesLock reports whether the copy request carried object-lock fields, i.e.
+// whether the source object was locked and attribute replication put that on the
+// request. Only then can a rejection be about object lock.
+func carriesLock(attrs ObjectAttrs) bool {
+	if attrs.LegalHold != "" {
+		return true
+	}
+	return attrs.liveRetention(time.Now().UTC()) && attrs.LockMode != ""
+}
+
+// explainCopyError names the one cause a bare S3 rejection hides. A target
+// bucket created without object lock rejects every copy carrying lock fields,
+// and the error says nothing about lock, the bucket, or the fix — so a pair set
+// up against such a bucket fails every object with a message that points at the
+// wrong thing. Object lock can only be enabled at bucket creation, so the fix is
+// to recreate the target, which is what this says.
+func (wp *WorkerPool) explainCopyError(key string, attrs ObjectAttrs, err error) error {
+	if !carriesLock(attrs) {
+		return err
+	}
+	return fmt.Errorf("copy %q to target bucket %q with object lock: %w: "+
+		"the target bucket must have been created with object lock enabled, "+
+		"which cannot be turned on after creation", key, wp.targetBucket, err)
 }
 
 func (wp *WorkerPool) copyRequest(key, copySource string, attrs ObjectAttrs) *s3.CopyObjectInput {

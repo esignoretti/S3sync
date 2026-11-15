@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -12,11 +13,21 @@ import (
 	"github.com/esignoretti/S3sync/internal/config"
 )
 
+// ErrPairExpired reports a pair whose target lifecycle expiry date has passed.
+// The run refuses instead of copying objects the target will delete again: per
+// the design, the pair is finished rather than broken, and the recovery is
+// moving target_expire_at into the future.
+var ErrPairExpired = errors.New("sync pair target expiry has passed")
+
 type Progress struct {
 	mu        sync.Mutex
 	Total     int `json:"total"`
 	Completed int `json:"completed"`
 	Failed    int `json:"failed"`
+	// Pending counts objects whose bytes were copied but whose characteristics
+	// were only partially applied. The copy did happen, so they are completed
+	// work too; the separate count is what makes the incomplete part visible.
+	Pending int `json:"pending"`
 }
 
 func (p *Progress) Add(err bool) {
@@ -26,6 +37,21 @@ func (p *Progress) Add(err bool) {
 		p.Failed++
 	}
 	p.mu.Unlock()
+}
+
+// AddPending records one object that completed without fully applying its
+// characteristics.
+func (p *Progress) AddPending() {
+	p.mu.Lock()
+	p.Pending++
+	p.Completed++
+	p.mu.Unlock()
+}
+
+func (p *Progress) PendingCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Pending
 }
 
 func (p *Progress) Snapshot() (total, completed, failed int) {
@@ -59,6 +85,7 @@ type Engine struct {
 	cancel        context.CancelFunc
 
 	setupOnce sync.Once
+	setupErr  error
 }
 
 func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
@@ -90,15 +117,35 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.running = true
 	e.mu.Unlock()
 
+	defer func() {
+		e.mu.Lock()
+		e.running = false
+		e.mu.Unlock()
+	}()
+
 	e.mu.Lock()
 	if e.progress.Total > 0 || e.progress.Completed > 0 {
-		e.lastResult = &Progress{Total: e.progress.Total, Completed: e.progress.Completed, Failed: e.progress.Failed}
+		e.lastResult = &Progress{
+			Total: e.progress.Total, Completed: e.progress.Completed,
+			Failed: e.progress.Failed, Pending: e.progress.Pending,
+		}
 	}
 	e.progress.Total = 0
 	e.progress.Completed = 0
 	e.progress.Failed = 0
+	e.progress.Pending = 0
 	e.lastError = ""
 	e.mu.Unlock()
+
+	// A lifecycle Expiration.Date already in the past has the target deleting
+	// objects as fast as this run copies them while the source still holds them,
+	// so every reset or cache loss re-copies what has already expired, forever.
+	// Refuse before touching anything: the pair has reached end of life.
+	if e.pair.TargetExpireAt != nil && time.Now().UTC().After(*e.pair.TargetExpireAt) {
+		e.setResult("expired", fmt.Sprintf("target expiry passed at %s",
+			e.pair.TargetExpireAt.UTC().Format(time.RFC3339)))
+		return ErrPairExpired
+	}
 
 	timeout := 5 * time.Minute
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -111,7 +158,6 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 
 	defer func() {
 		e.mu.Lock()
-		e.running = false
 		e.cancel = nil
 		e.mu.Unlock()
 		cancel()
@@ -120,13 +166,38 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	slog.Info("sync start", "pair", e.pair.Name)
 	startTime := time.Now()
 
+	// Provisioning failures are exactly what this preflight exists to prevent, so
+	// they fail the run instead of being logged and swallowed: carrying on would
+	// copy every object into a target that rejects it and report a run full of
+	// per-object failures rather than the one real cause. setupOnce still means
+	// one attempt per engine; the recorded error is what every later run returns.
 	e.setupOnce.Do(func() {
 		setupCtx, setupCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer setupCancel()
-		if err := SetupTargetBucket(setupCtx, e.tgtS3, e.src.Region, e.tgt); err != nil {
-			slog.Warn("target bucket setup", "pair", e.pair.Name, "error", err)
+		err := ProvisionTarget(setupCtx, e.tgtS3, e.src.Region, e.tgt, e.pair,
+			ProvisionOptions{Now: time.Now().UTC()})
+
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if err != nil {
+			e.setupErr = err
+			e.pair.ProvisionError = err.Error()
+			e.pair.ProvisionedAt = nil
+			return
 		}
+		provisionedAt := time.Now().UTC()
+		e.setupErr = nil
+		e.pair.ProvisionError = ""
+		e.pair.ProvisionedAt = &provisionedAt
 	})
+
+	e.mu.Lock()
+	setupErr := e.setupErr
+	e.mu.Unlock()
+	if setupErr != nil {
+		e.setResult("error", fmt.Sprintf("provision target: %v", setupErr))
+		return fmt.Errorf("provision target: %w", setupErr)
+	}
 
 	cacheCur, closeCur, err := e.store.NewCursor(e.pair.ID)
 	if err != nil {
@@ -136,6 +207,19 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 
 	actions := make(chan SyncAction, 10000)
 	diffErrCh := make(chan error, 1)
+
+	// The drift sweep is the only detector for characteristics that changed
+	// without bumping the ETag or LastModified. It writes into the same channel
+	// the diff does, so it runs in its own goroutine and the diff's goroutine
+	// waits for it: the sweep must not overlap the diff (only the diff closes the
+	// channel), and it must not run inline either, because it can emit more
+	// actions than the buffer holds while nothing is reading yet. The consumer
+	// below therefore starts before either producer.
+	sweepDue := ShouldReconcile(e.pair, time.Now().UTC())
+	sweepErrCh := make(chan error, 1)
+	if sweepDue {
+		go func() { sweepErrCh <- e.reconcileSweep(ctx, actions) }()
+	}
 
 	listPage := func(ctx context.Context, token *string) (*s3.ListObjectsV2Output, error) {
 		reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -157,33 +241,54 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 				diffErrCh <- fmt.Errorf("diff panic: %v", r)
 			}
 		}()
+		// The sweep writes into the same channel the diff does, and the diff is
+		// what closes it, so the diff must not start until the sweep is done.
+		// Waiting here (rather than running the sweep inline) is what keeps the
+		// two producers from overlapping on a channel only one of them closes.
+		if sweepDue {
+			if err := <-sweepErrCh; err != nil {
+				slog.Warn("reconcile sweep", "pair", e.pair.Name, "error", err)
+			} else {
+				sweptAt := time.Now().UTC()
+				e.mu.Lock()
+				e.pair.LastReconcileAt = &sweptAt
+				e.mu.Unlock()
+			}
+		}
 		err := StreamingDiff(ctx, listPage, cacheCur, e.pair.DeletePropagation, actions)
 		diffErrCh <- err
 	}()
 
-	var succeeded []SyncAction
-	var succeededCount, failed int
+	type poolResult struct {
+		succeeded []SyncAction
+		count     int
+		failed    int
+	}
+	poolCh := make(chan poolResult, 1)
 
+	// The consumer starts before any producer: the sweep can emit more actions
+	// than the channel buffer holds, and nothing else is reading yet, so without
+	// a live reader the sweep would block until the run's deadline.
 	if e.pair.DryRun {
-		for a := range actions {
-			slog.Info("dry-run", "action", a.Type, "key", a.Key)
-			succeeded = append(succeeded, a)
-			succeededCount++
-		}
+		go func() {
+			var done []SyncAction
+			for a := range actions {
+				slog.Info("dry-run", "action", a.Type, "key", a.Key)
+				done = append(done, a)
+			}
+			poolCh <- poolResult{succeeded: done, count: len(done)}
+		}()
 	} else {
-		type poolResult struct {
-			succeeded []SyncAction
-			count     int
-			failed    int
-		}
-		poolCh := make(chan poolResult, 1)
 		go func() {
 			s, c, f := e.pool.Run(ctx, actions)
-			poolCh <- poolResult{s, c, f}
+			poolCh <- poolResult{succeeded: s, count: c, failed: f}
 		}()
-		r := <-poolCh
-		succeeded, succeededCount, failed = r.succeeded, r.count, r.failed
+	}
 
+	r := <-poolCh
+	succeeded, succeededCount, failed := r.succeeded, r.count, r.failed
+
+	if !e.pair.DryRun {
 		e.mu.Lock()
 		e.lastSucceeded = succeededCount
 		e.lastFailed = failed
@@ -282,13 +387,27 @@ func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastE
 		p.Total = total
 		p.Completed = completed
 		p.Failed = failed
+		p.Pending = e.progress.PendingCount()
 	}
 	if !e.running && p.Total == 0 && p.Completed == 0 && e.lastResult != nil {
 		p.Total = e.lastResult.Total
 		p.Completed = e.lastResult.Completed
 		p.Failed = e.lastResult.Failed
+		p.Pending = e.lastResult.Pending
 	}
 	return e.running, e.lastRun, e.lastStatus, e.lastError, p
+}
+
+// PendingAttrs reports how many objects in the last run completed with their
+// characteristics only partially applied. It is what the API exposes as
+// attrs_pending.
+func (e *Engine) PendingAttrs() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.progress == nil {
+		return 0
+	}
+	return e.progress.PendingCount()
 }
 
 func (e *Engine) LastResult() (succeeded, failed int) {

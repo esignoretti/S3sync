@@ -842,3 +842,147 @@ func TestWorkerPoolRun_DispatchesCopyAttributes(t *testing.T) {
 		t.Fatal("Run dropped the fingerprint")
 	}
 }
+
+// A locked source copied into a bucket created without object lock fails every
+// object with a bare S3 rejection that names neither the cause nor the fix.
+// Object lock can only be enabled at bucket creation, so the error must say so.
+func TestCopyObject_LockRejectionNamesObjectLockAndTargetBucket(t *testing.T) {
+	until := time.Now().UTC().Add(24 * time.Hour)
+	api := &fakeCopyAPI{
+		headOut: &s3.HeadObjectOutput{
+			ObjectLockMode:            s3types.ObjectLockModeGovernance,
+			ObjectLockRetainUntilDate: &until,
+		},
+		copyErr: errors.New("InvalidRequest: object lock is not enabled for this bucket"),
+	}
+	wp := newTestWorkerPool(api)
+	_, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "locked", ETag: `"e"`})
+	if err == nil {
+		t.Fatal("expected the CopyObject rejection to surface")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "object lock") {
+		t.Fatalf("error does not name object lock: %v", msg)
+	}
+	if !strings.Contains(msg, testTargetBucket) {
+		t.Fatalf("error does not name the target bucket: %v", msg)
+	}
+	if !strings.Contains(msg, "locked") {
+		t.Fatalf("error does not name the object: %v", msg)
+	}
+	if !strings.Contains(msg, "created with object lock") {
+		t.Fatalf("error does not say lock must be set at bucket creation: %v", msg)
+	}
+	if !errors.Is(err, api.copyErr) {
+		t.Fatalf("error does not wrap the original: %v", err)
+	}
+}
+
+// A legal hold is lock state without a retention date, so it can be rejected the
+// same way and must be explained the same way.
+func TestCopyObject_LegalHoldRejectionIsExplained(t *testing.T) {
+	api := &fakeCopyAPI{
+		headOut: &s3.HeadObjectOutput{ObjectLockLegalHoldStatus: s3types.ObjectLockLegalHoldStatusOn},
+		copyErr: errors.New("InvalidRequest"),
+	}
+	wp := newTestWorkerPool(api)
+	_, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if err == nil || !strings.Contains(err.Error(), "object lock") {
+		t.Fatalf("legal-hold rejection not explained: %v", err)
+	}
+}
+
+// An unlocked source has nothing to do with object lock, so its rejection must
+// arrive unwrapped: adding the lock hint would send the user to the wrong cause.
+func TestCopyObject_UnlockedRejectionIsNotWrapped(t *testing.T) {
+	orig := errors.New("AccessDenied")
+	api := &fakeCopyAPI{
+		headOut: &s3.HeadObjectOutput{ContentType: aws.String("text/csv")},
+		copyErr: orig,
+	}
+	wp := newTestWorkerPool(api)
+	_, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if !errors.Is(err, orig) {
+		t.Fatalf("error does not wrap the original: %v", err)
+	}
+	if strings.Contains(err.Error(), "object lock") {
+		t.Fatalf("unlocked source got the object-lock hint: %v", err)
+	}
+}
+
+// An expired retention is dropped from the request, so it cannot be the cause of
+// a rejection and must not attract the lock hint either.
+func TestCopyObject_ExpiredRetentionRejectionIsNotWrapped(t *testing.T) {
+	past := time.Now().UTC().Add(-time.Hour)
+	orig := errors.New("AccessDenied")
+	api := &fakeCopyAPI{
+		headOut: &s3.HeadObjectOutput{
+			ObjectLockMode:            s3types.ObjectLockModeGovernance,
+			ObjectLockRetainUntilDate: &past,
+		},
+		copyErr: orig,
+	}
+	wp := newTestWorkerPool(api)
+	_, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`})
+	if strings.Contains(err.Error(), "object lock") {
+		t.Fatalf("expired retention got the lock hint for fields that were not sent: %v", err)
+	}
+}
+
+// A pending action copied the bytes but not all of the characteristics. It is
+// completed work, and the separate count is what makes the gap visible instead
+// of hiding it inside "succeeded".
+func TestWorkerPoolRun_CountsPendingAttrs(t *testing.T) {
+	api := &fakeCopyAPI{
+		headOut:    &s3.HeadObjectOutput{ContentType: aws.String("text/csv")},
+		putTagsErr: errors.New("tag write refused"),
+	}
+	progress := &Progress{}
+	wp := newTestWorkerPool(api)
+	wp.progress = progress
+	actions := make(chan SyncAction, 1)
+	actions <- SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`}
+	close(actions)
+
+	succeeded, count, failed := wp.Run(context.Background(), actions)
+	if failed != 0 || count != 1 || len(succeeded) != 1 {
+		t.Fatalf("Run: succeeded %d, failed %d; a pending object still copied its bytes", count, failed)
+	}
+	if !succeeded[0].PendingAttrs {
+		t.Fatal("the action lost its pending mark; the cache would record a complete attribute state")
+	}
+	if got := progress.PendingCount(); got != 1 {
+		t.Fatalf("PendingCount = %d, want 1", got)
+	}
+	total, completed, failedCount := progress.Snapshot()
+	if completed != 1 {
+		t.Fatalf("Completed = %d, want 1: a pending action did complete", completed)
+	}
+	if failedCount != 0 {
+		t.Fatalf("Failed = %d, want 0", failedCount)
+	}
+	if total != 0 {
+		t.Fatalf("Total = %d, want 0: the engine sets it after the run", total)
+	}
+}
+
+// A clean copy must not be counted as pending.
+func TestWorkerPoolRun_CleanCopyIsNotPending(t *testing.T) {
+	api := &fakeCopyAPI{headOut: &s3.HeadObjectOutput{ContentType: aws.String("text/csv")}}
+	progress := &Progress{}
+	wp := newTestWorkerPool(api)
+	wp.progress = progress
+	actions := make(chan SyncAction, 1)
+	actions <- SyncAction{Type: ActionCopy, Key: "k", ETag: `"e"`}
+	close(actions)
+
+	if _, _, failed := wp.Run(context.Background(), actions); failed != 0 {
+		t.Fatalf("failed = %d", failed)
+	}
+	if got := progress.PendingCount(); got != 0 {
+		t.Fatalf("PendingCount = %d, want 0", got)
+	}
+	if _, completed, _ := progress.Snapshot(); completed != 1 {
+		t.Fatalf("Completed = %d, want 1", completed)
+	}
+}
