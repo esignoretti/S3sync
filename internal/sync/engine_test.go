@@ -320,7 +320,7 @@ func TestRunOnce_SurfacesProvisioningError(t *testing.T) {
 		t.Fatalf("ProvisionedAt = %v, want nil after a failed provision", pair.ProvisionedAt)
 	}
 	for _, req := range ep.log() {
-		if strings.HasSuffix(req, "/"+testSourceBucket) {
+		if strings.HasPrefix(req, "GET /"+testSourceBucket+"?list-type=2") {
 			t.Fatalf("the run listed the source after provisioning failed: %v", ep.log())
 		}
 	}

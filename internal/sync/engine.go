@@ -63,6 +63,34 @@ func (p *Progress) Snapshot() (total, completed, failed int) {
 	return
 }
 
+// SnapshotFull is Snapshot plus the pending count, for callers that report it.
+func (p *Progress) SnapshotFull() (total, completed, failed, pending int) {
+	p.mu.Lock()
+	total, completed, failed = p.Total, p.Completed, p.Failed
+	pending = p.Pending
+	p.mu.Unlock()
+	return
+}
+
+// Reset clears the per-run counters. It takes p.mu like every other accessor:
+// the CLI polls Status every 2s while a run is in progress, and Status reads
+// these fields through SnapshotFull.
+func (p *Progress) Reset() {
+	p.mu.Lock()
+	p.Total = 0
+	p.Completed = 0
+	p.Failed = 0
+	p.Pending = 0
+	p.mu.Unlock()
+}
+
+// SetTotal records how much work the finished run turned out to be.
+func (p *Progress) SetTotal(n int) {
+	p.mu.Lock()
+	p.Total = n
+	p.mu.Unlock()
+}
+
 type Engine struct {
 	pair      *config.SyncPair
 	src       *config.Bucket
@@ -124,18 +152,16 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}()
 
 	e.mu.Lock()
-	if e.progress.Total > 0 || e.progress.Completed > 0 {
+	total, completed, failed, pending := e.progress.SnapshotFull()
+	if total > 0 || completed > 0 {
 		e.lastResult = &Progress{
-			Total: e.progress.Total, Completed: e.progress.Completed,
-			Failed: e.progress.Failed, Pending: e.progress.Pending,
+			Total: total, Completed: completed,
+			Failed: failed, Pending: pending,
 		}
 	}
-	e.progress.Total = 0
-	e.progress.Completed = 0
-	e.progress.Failed = 0
-	e.progress.Pending = 0
 	e.lastError = ""
 	e.mu.Unlock()
+	e.progress.Reset()
 
 	// A lifecycle Expiration.Date already in the past has the target deleting
 	// objects as fast as this run copies them while the source still holds them,
@@ -321,9 +347,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}
 
 	totalActions := succeededCount + failed
-	e.mu.Lock()
-	e.progress.Total = totalActions
-	e.mu.Unlock()
+	e.progress.SetTotal(totalActions)
 
 	slog.Info("sync complete", "pair", e.pair.Name,
 		"succeeded", succeededCount, "failed", failed)
@@ -383,11 +407,8 @@ func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastE
 	defer e.mu.Unlock()
 	p := Progress{}
 	if e.progress != nil {
-		total, completed, failed := e.progress.Snapshot()
-		p.Total = total
-		p.Completed = completed
-		p.Failed = failed
-		p.Pending = e.progress.PendingCount()
+		total, completed, failed, pending := e.progress.SnapshotFull()
+		p.Total, p.Completed, p.Failed, p.Pending = total, completed, failed, pending
 	}
 	if !e.running && p.Total == 0 && p.Completed == 0 && e.lastResult != nil {
 		p.Total = e.lastResult.Total

@@ -349,6 +349,11 @@ func carriesLock(attrs ObjectAttrs) bool {
 // wrong thing. Object lock can only be enabled at bucket creation, so the fix is
 // to recreate the target, which is what this says.
 func (wp *WorkerPool) explainCopyError(key string, attrs ObjectAttrs, err error) error {
+	// A cancelled or timed-out request never reached the target's lock check, so
+	// blaming object lock here would send the reader after the wrong cause.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	if !carriesLock(attrs) {
 		return err
 	}
