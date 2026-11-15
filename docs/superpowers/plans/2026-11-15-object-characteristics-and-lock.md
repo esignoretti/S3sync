@@ -892,7 +892,7 @@ func ShouldReconcile(pair *config.SyncPair, now time.Time) bool
 func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) error
 ```
 
-`reconcileSweep` walks the cache via `e.store.List(pair.ID)` in key order, HEADs each source object (throttled, `errors.As(err, &s3types.NotFound{})` → skip and log), compares `AttrsFromHead(out).Hash()` against `entry.AttrsHash`, and emits `ActionCopyAttributes` on mismatch. An empty `entry.AttrsHash` is skipped silently.
+`reconcileSweep` walks the cache via `e.store.List(pair.ID)` in key order, HEADs each source object (throttled, `errors.As(err, &s3types.NotFound{})` → skip and log), compares `AttrsFromHead(out).WithEffectiveStorageClass(pair.TargetStorageClass).Hash()` against `entry.AttrsHash`, and emits `ActionCopyAttributes` on mismatch. **`WithEffectiveStorageClass` is mandatory on both sides of the comparison.** The writer (`WorkerPool.copyObject`) hashes the *effective target* storage class, not the source's, because that is what the copy actually applies; the reader must normalize the same way or every pair with `TargetStorageClass` set will reconcile forever. An empty `entry.AttrsHash` is skipped silently.
 
 `worker.go`: `applyAttrs` runs the same steps as `copyObject` minus the byte copy — source `HeadObject`, `GetObjectTagging`, `PutObjectTagging` — and returns the action with a fresh `AttrsHash`. `Run` dispatches `case ActionCopyAttributes: a, err = wp.applyAttrs(ctx, a)`.
 
