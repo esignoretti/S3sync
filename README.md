@@ -161,9 +161,11 @@ Cards show per-pair:
 |--------|--------|
 | Sync Now | One-shot sync cycle |
 | Pause / Resume | Toggle periodic sync loop on/off |
-| Edit | Change interval, workers, rate limit |
+| Edit | Change interval, workers, rate limit, attribute replication, reconcile interval, expiry date, noncurrent rules |
 | Reset | Clear cache + status, restart from scratch |
 | Delete | Remove pair config |
+
+Editing a running pair replaces its engine, so changes take effect on the next cycle without a restart. Two settings are deliberately not editable: `require_object_lock` and `on_lock_missing`, because they describe how the target bucket was created.
 
 ## API
 
@@ -218,7 +220,9 @@ s3sync (single binary)
 
 Sync engine per pair (goroutine):
   Ticker → RunOnce:
-    ListObjectsV2 → Cache compare (ETag) → Diff → Worker pool (COPY/DELETE) → Cache update (succeeded only)
+    expiry guard (refuse if past target_expire_at) → provision target (once)
+    → optional drift sweep → ListObjectsV2 → Cache compare (ETag) → Diff
+    → Worker pool (COPY / DELETE / COPY-ATTRIBUTES) → Cache update (succeeded only)
 
 Worker pool:
   N goroutines pull from buffered action channel
@@ -227,20 +231,24 @@ Worker pool:
 
 Only successfully transferred objects are cached.
 Failed objects retry on next cycle.
+Source objects over 5 GiB fail with ErrObjectTooLarge — multipart copy is not implemented.
 ```
 
 ### Sync Cycle Details
 
 Each cycle:
-1. **List** all source objects via paginated `ListObjectsV2` (1000/page)
-2. **Load cache** from BoltDB for this pair (objects from previous successful syncs)
-3. **Diff** — compare ETag + LastModified against cache:
+0. **Guard** — a pair whose target expiry has passed refuses to run at all (`ErrPairExpired`, status `expired`). Provisioning runs once per engine, before anything else, and a failure fails the whole run rather than logging and continuing.
+1. **Sweep** (optional) — if `attrs_reconcile_interval` has elapsed, re-read each cached object's attributes and queue a COPY for any whose fingerprint drifted.
+2. **List** all source objects via paginated `ListObjectsV2` (1000/page)
+3. **Load cache** from BoltDB for this pair (objects from previous successful syncs)
+4. **Diff** — compare ETag + LastModified against cache:
    - Not in cache → COPY
    - ETag or timestamp changed → COPY
+   - Match but `pending_attrs` set → COPY-ATTRIBUTES (retry the tag write only)
    - Match → skip
    - In cache but not in listing (if delete propagation enabled) → DELETE
-4. **Execute** — worker pool copies new/changed, deletes removed
-5. **Cache only succeeded** — failed items not cached, retried next cycle
+5. **Execute** — worker pool copies new/changed, deletes removed
+6. **Cache only succeeded** — failed items not cached, retried next cycle. Objects that vanished from the source between listing and copy are neither counted nor cached, so the next diff re-emits them.
 
 ### Restart Behavior
 
@@ -309,7 +317,9 @@ Creation and update return non-blocking warnings rather than failing:
 
 **Credentials:** S3 access/secret keys encrypted at rest with AES-256-GCM. Set `BUCKETSYNC_MASTER_KEY` env var for encryption.
 
-**Target bucket:** On first sync, engine checks if target exists. If not, creates it with source region, enables versioning and object lock if configured. If it exists, the preflight verifies lock state and rewrites the lifecycle configuration; mismatches are reported as errors rather than silently ignored.
+**Target bucket:** On first sync, engine checks if target exists. If not, creates it with source region, enables versioning and object lock if configured. If it exists, the preflight verifies lock state and rewrites the lifecycle configuration; mismatches are reported as errors rather than silently ignored. Provisioning runs once per engine instance, so a failed provision fails that run instead of being logged and skipped. `pair update` never recreates a target — only `pair add` with `--on-lock-missing recreate --force-recreate` can, and only an empty bucket.
+
+**Credentials in the API:** `POST /api/buckets` binds `config.Bucket`, whose `AccessKey`/`SecretKey` are `json:"-"`, so credentials cannot be supplied on that endpoint — a bucket created there has none and will fail with `static credentials are empty`. Add credentialed buckets with `bucket add` on the CLI or through the setup wizard (`POST /api/setup`), whose `SetupInput` does accept `access_key`/`secret_key`. Credentials are never returned by any endpoint.
 
 **Throttling:** Each sync pair sets `max_get_ops_per_minute`. Token bucket limits GET/HEAD ops on source. 0 = unlimited.
 
@@ -331,6 +341,16 @@ export S3_TEST_ACCESS_KEY=test
 export S3_TEST_SECRET_KEY=test
 go test -tags=integration ./tests/ -v
 ```
+
+`tests/ds3_claims_test.go` is the important one: it verifies the eight endpoint behaviours this tool's correctness rests on (tag handling on copy, `MetadataDirective: REPLACE`, unstored `Content-Language`/`Expires`, lifecycle `Date` without `Filter`, lock headers on copy, lock-at-creation-only, ignored `x-amz-copy-source-if-*`). Each of those, if wrong, produces silently incorrect data rather than an error. Run it against any new endpoint before trusting attribute replication:
+
+```bash
+export S3_TEST_ENDPOINT=https://s3.cubbit.eu
+export S3_TEST_ACCESS_KEY=... S3_TEST_SECRET_KEY=...
+go test -tags=integration ./tests/ -run TestDS3 -v
+```
+
+Each test creates and deletes its own scratch bucket and skips when the endpoint is absent.
 
 ## License
 
