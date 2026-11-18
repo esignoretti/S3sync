@@ -93,6 +93,24 @@ func (f *fakeSweepAPI) DeleteObject(context.Context, *s3.DeleteObjectInput, ...f
 	return &s3.DeleteObjectOutput{}, nil
 }
 
+// The sweep never copies more than a few attributes, so its fake has no
+// multipart behaviour to model; the methods exist only to satisfy copyAPI.
+func (f *fakeSweepAPI) CreateMultipartUpload(context.Context, *s3.CreateMultipartUploadInput, ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	return &s3.CreateMultipartUploadOutput{UploadId: aws.String("upload-1")}, nil
+}
+
+func (f *fakeSweepAPI) UploadPartCopy(context.Context, *s3.UploadPartCopyInput, ...func(*s3.Options)) (*s3.UploadPartCopyOutput, error) {
+	return &s3.UploadPartCopyOutput{}, nil
+}
+
+func (f *fakeSweepAPI) CompleteMultipartUpload(context.Context, *s3.CompleteMultipartUploadInput, ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (f *fakeSweepAPI) AbortMultipartUpload(context.Context, *s3.AbortMultipartUploadInput, ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
 var _ copyAPI = (*fakeSweepAPI)(nil)
 
 func newReconcileEngine(t *testing.T, pair *config.SyncPair, api copyAPI, entries ...cache.CachedObject) *Engine {

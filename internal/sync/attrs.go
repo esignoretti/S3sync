@@ -175,3 +175,45 @@ func (a ObjectAttrs) copyInput(bucket, key, copySource string, storageClass stri
 
 	return in
 }
+
+// createMPUInput builds the multipart-create request carrying the same
+// characteristics copyInput carries, so the two copy paths cannot drift. The
+// storage class is a parameter rather than an ObjectAttrs field because it must
+// apply even when attribute replication is off — with replication off the attrs
+// value is the zero value, and the pair override would be lost.
+//
+// Tags are never set here: the endpoint does not apply x-amz-tagging on create
+// either, so they go through PutObjectTagging in the attribute step.
+func (a ObjectAttrs) createMPUInput(bucket, key, storageClass string) *s3.CreateMultipartUploadInput {
+	in := &s3.CreateMultipartUploadInput{Bucket: &bucket, Key: &key}
+	if a.ContentType != "" {
+		in.ContentType = &a.ContentType
+	}
+	if a.ContentDisposition != "" {
+		in.ContentDisposition = &a.ContentDisposition
+	}
+	if a.ContentEncoding != "" {
+		in.ContentEncoding = &a.ContentEncoding
+	}
+	if a.CacheControl != "" {
+		in.CacheControl = &a.CacheControl
+	}
+	if len(a.Metadata) > 0 {
+		in.Metadata = a.Metadata
+	}
+
+	switch {
+	case storageClass != "":
+		in.StorageClass = types.StorageClass(storageClass)
+	case a.StorageClass != "":
+		in.StorageClass = a.StorageClass
+	}
+
+	if a.liveRetention(time.Now().UTC()) {
+		in.ObjectLockMode = a.LockMode
+		in.ObjectLockRetainUntilDate = a.RetainUntil
+	}
+	in.ObjectLockLegalHoldStatus = a.LegalHold
+
+	return in
+}

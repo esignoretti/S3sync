@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,89 @@ type fakeCopyAPI struct {
 	lastTags   []s3types.Tag
 	putTagsIn  *s3.PutObjectTaggingInput
 	getTagsIn  *s3.GetObjectTaggingInput
+
+	// Multipart state. partRanges records the CopySourceRange of each part so a
+	// test can prove every range carries an explicit end offset.
+	createdMPU       int
+	createdUploadID  string
+	mpuErr           error
+	mpuStorageClass  string
+	mpuContentType   string
+	mpuMetadata      map[string]string
+	partRanges       []string
+	partErrAt        int
+	cancelAfterPart  int
+	cancelFunc       context.CancelFunc
+	completedParts   int
+	aborted          int
+	abortUploadID    string
+	abortContextLive bool
+}
+
+// partsTotal sums the byte counts of the ranges the fake was asked to copy.
+func (f *fakeCopyAPI) partsTotal() int64 {
+	var total int64
+	for _, r := range f.partRanges {
+		var start, end int64
+		if _, err := fmt.Sscanf(r, "bytes=%d-%d", &start, &end); err != nil {
+			continue
+		}
+		total += end - start + 1
+	}
+	return total
+}
+
+func (f *fakeCopyAPI) CreateMultipartUpload(_ context.Context, in *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	f.createdMPU++
+	f.createdUploadID = "upload-1"
+	if in.StorageClass != "" {
+		f.mpuStorageClass = string(in.StorageClass)
+	}
+	if in.ContentType != nil {
+		f.mpuContentType = *in.ContentType
+	}
+	f.mpuMetadata = in.Metadata
+	if f.mpuErr != nil {
+		return nil, f.mpuErr
+	}
+	return &s3.CreateMultipartUploadOutput{UploadId: aws.String(f.createdUploadID)}, nil
+}
+
+func (f *fakeCopyAPI) UploadPartCopy(ctx context.Context, in *s3.UploadPartCopyInput, _ ...func(*s3.Options)) (*s3.UploadPartCopyOutput, error) {
+	if in.CopySourceRange != nil {
+		f.partRanges = append(f.partRanges, *in.CopySourceRange)
+	}
+	n := len(f.partRanges)
+	if f.partErrAt != 0 && n == f.partErrAt {
+		return nil, errors.New("part copy failed")
+	}
+	if f.cancelAfterPart != 0 && n >= f.cancelAfterPart {
+		// Simulates the run budget expiring mid-upload: the test's cancel func
+		// kills the parent context, which is what copyObject hands the
+		// multipart path.
+		if f.cancelFunc == nil {
+			panic("fakeCopyAPI.cancelAfterPart set without cancelFunc")
+		}
+		f.cancelFunc()
+		return nil, ctx.Err()
+	}
+	return &s3.UploadPartCopyOutput{
+		CopyPartResult: &s3types.CopyPartResult{ETag: aws.String(fmt.Sprintf(`"part%d"`, n))},
+	}, nil
+}
+
+func (f *fakeCopyAPI) CompleteMultipartUpload(_ context.Context, in *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	if in.MultipartUpload != nil {
+		f.completedParts = len(in.MultipartUpload.Parts)
+	}
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (f *fakeCopyAPI) AbortMultipartUpload(ctx context.Context, in *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	f.aborted++
+	f.abortUploadID = aws.ToString(in.UploadId)
+	f.abortContextLive = ctx.Err() == nil
+	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
 // testSourceBucket/testTargetBucket are the bucket names newTestWorkerPool uses,
@@ -224,9 +308,10 @@ func TestCopyObject_SourceHeadErrorIsRetriedAndFails(t *testing.T) {
 }
 
 // Pins the accounting split at the Run level: a too-large object is a failure,
-// a vanished one is neither.
+// a vanished one is neither. "Too large" now means past the 5 TiB object limit,
+// not past the 5 GiB single-copy limit: between them the copy goes multipart.
 func TestWorkerPoolRun_TooLargeObjectIsFailed(t *testing.T) {
-	api := &fakeCopyAPI{headLen: 6 << 30}
+	api := &fakeCopyAPI{headLen: maxMultipartObjectSize + 1}
 	wp := newTestWorkerPool(api)
 	actions := make(chan SyncAction, 1)
 	actions <- SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`}
@@ -276,7 +361,7 @@ func TestWorkerPoolRun_DeleteRoutesToTarget(t *testing.T) {
 }
 
 func TestCopyObject_TooLarge(t *testing.T) {
-	api := &fakeCopyAPI{headLen: 6 << 30}
+	api := &fakeCopyAPI{headLen: maxMultipartObjectSize + 1}
 	wp := newTestWorkerPool(api)
 	_, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`})
 	if !errors.Is(err, ErrObjectTooLarge) {
@@ -286,10 +371,29 @@ func TestCopyObject_TooLarge(t *testing.T) {
 		t.Fatalf("CopyObject called %d times, want 0", api.copied)
 	}
 	// The user must be able to see why their object was rejected.
-	for _, want := range []string{"6442450944", "5368709120"} {
+	for _, want := range []string{"5497558138881", "5497558138880"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err = %q, want it to name %s", err, want)
 		}
+	}
+	if api.createdMPU != 0 {
+		t.Fatalf("a multipart upload was started for an object past the hard limit")
+	}
+}
+
+// 6 GiB is above the single-copy limit and below the object limit, so it must
+// move as parts rather than fail.
+func TestCopyObject_JustAboveSingleCopyLimitGoesMultipart(t *testing.T) {
+	api := &fakeCopyAPI{headLen: 6 << 30}
+	wp := newTestWorkerPool(api)
+	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`}); err != nil {
+		t.Fatalf("copyObject returned %v; 6 GiB fits the multipart path", err)
+	}
+	if api.copied != 0 {
+		t.Fatalf("a single CopyObject was issued for a 6 GiB object")
+	}
+	if api.createdMPU != 1 {
+		t.Fatalf("CreateMultipartUpload calls = %d, want 1", api.createdMPU)
 	}
 }
 

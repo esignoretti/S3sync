@@ -33,12 +33,16 @@ type copyAPI interface {
 	GetObjectTagging(context.Context, *s3.GetObjectTaggingInput, ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error)
 	PutObjectTagging(context.Context, *s3.PutObjectTaggingInput, ...func(*s3.Options)) (*s3.PutObjectTaggingOutput, error)
 	DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	CreateMultipartUpload(context.Context, *s3.CreateMultipartUploadInput, ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error)
+	UploadPartCopy(context.Context, *s3.UploadPartCopyInput, ...func(*s3.Options)) (*s3.UploadPartCopyOutput, error)
+	CompleteMultipartUpload(context.Context, *s3.CompleteMultipartUploadInput, ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
+	AbortMultipartUpload(context.Context, *s3.AbortMultipartUploadInput, ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error)
 }
 
-// ErrObjectTooLarge reports a source object that CopyObject cannot move in one
-// request. It is permanent: the object will not shrink on a retry, so it is
-// returned unwrapped by retryS3.
-var ErrObjectTooLarge = errors.New("object exceeds the 5 GiB CopyObject limit")
+// ErrObjectTooLarge reports a source object larger than the endpoint's hard
+// object limit, which no copy path can move. It is permanent: the object will not
+// shrink on a retry, so it is returned unwrapped by retryS3.
+var ErrObjectTooLarge = errors.New("object exceeds the 5 TiB object limit")
 
 // errObjectVanished reports a source object that disappeared between listing
 // and HEAD. Run treats it as neither success nor failure: an object that was
@@ -46,7 +50,13 @@ var ErrObjectTooLarge = errors.New("object exceeds the 5 GiB CopyObject limit")
 // key synced and never retry it.
 var errObjectVanished = errors.New("source object vanished")
 
-const maxCopyObjectSize = 5 << 30
+const (
+	maxCopyObjectSize      = 5 << 30 // single CopyObject limit
+	maxMultipartObjectSize = 5 << 40 // hard object limit on this endpoint
+	maxMultipartParts      = 10000
+	minPartSize            = 5 << 20
+	maxPartSize            = 5 << 30
+)
 
 func NewWorkerPool(workers int, srcClient, tgtClient *s3.Client, source, target string,
 	throttler *Throttler, storageClass string, progress *Progress, replicateAttrs bool) *WorkerPool {
@@ -163,8 +173,10 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction,
 		return a, errObjectVanished
 	}
 
-	if size := aws.ToInt64(headOut.ContentLength); size > maxCopyObjectSize {
-		return a, fmt.Errorf("%w: key %q is %d bytes, limit %d", ErrObjectTooLarge, a.Key, size, int64(maxCopyObjectSize))
+	size := aws.ToInt64(headOut.ContentLength)
+	if size > maxMultipartObjectSize {
+		return a, fmt.Errorf("%w: key %q is %d bytes, limit %d",
+			ErrObjectTooLarge, a.Key, size, int64(maxMultipartObjectSize))
 	}
 
 	var attrs ObjectAttrs
@@ -172,21 +184,29 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction,
 		attrs = wp.effectiveAttrs(a.Key, headOut)
 	}
 
-	// No target-side ETag comparison: the differ already decided this object
-	// differs, and the target does not evaluate x-amz-copy-source-if-match, so a
-	// conditional copy would buy nothing.
-	copyOut, err := wp.copyBytes(reqCtx, a.Key, attrs)
-	if err != nil {
-		return a, err
+	var versionID *string
+	if size > maxCopyObjectSize {
+		// Above the single-request limit, so the object moves as parts. No 30s
+		// cap here: a multi-GiB copy legitimately takes minutes, and the run
+		// budget is the only sensible bound.
+		if _, err := wp.copyMultipart(ctx, a, attrs, size); err != nil {
+			return a, err
+		}
+	} else {
+		// No target-side ETag comparison: the differ already decided this object
+		// differs, and the target does not evaluate x-amz-copy-source-if-match,
+		// so a conditional copy would buy nothing.
+		copyOut, err := wp.copyBytes(reqCtx, a.Key, attrs)
+		if err != nil {
+			return a, err
+		}
+		if copyOut != nil {
+			versionID = copyOut.VersionId
+		}
 	}
 
 	if !wp.replicateAttrs {
 		return a, nil
-	}
-
-	var versionID *string
-	if copyOut != nil {
-		versionID = copyOut.VersionId
 	}
 	attrs, ok := wp.writeAttrs(reqCtx, a.Key, attrs, versionID)
 	if !ok {
