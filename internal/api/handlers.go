@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/esignoretti/S3sync/internal/config"
@@ -636,4 +637,39 @@ func (s *Server) health(c *gin.Context) {
 
 func (s *Server) version(c *gin.Context) {
 	respond(c, http.StatusOK, gin.H{"version": "0.2.0"})
+}
+
+// getSettings reports the global settings. The run timeout is read at the start
+// of every run, so a change here applies to the next run of every pair without a
+// restart.
+func (s *Server) getSettings(c *gin.Context) {
+	st, err := s.repo.GetSettings()
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond(c, http.StatusOK, gin.H{"run_timeout_seconds": st.RunTimeoutSeconds})
+}
+
+// updateSettings writes one setting and echoes the result. The range check lives
+// in config.SetSetting so the CLI and the API cannot disagree about it; an
+// out-of-range value is a client error with a stable code, not a 500.
+func (s *Server) updateSettings(c *gin.Context) {
+	var in struct {
+		RunTimeoutSeconds *int `json:"run_timeout_seconds"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if in.RunTimeoutSeconds == nil {
+		respondError(c, http.StatusBadRequest, "run_timeout_seconds is required")
+		return
+	}
+	if err := s.repo.SetSetting(config.SettingRunTimeoutSeconds,
+		strconv.Itoa(*in.RunTimeoutSeconds)); err != nil {
+		respondErrorCode(c, http.StatusUnprocessableEntity, "invalid_setting", err.Error())
+		return
+	}
+	s.getSettings(c)
 }

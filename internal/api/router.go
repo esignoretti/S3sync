@@ -306,6 +306,8 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/sync-pairs/:id/history", s.serveHistory)
 
 		api.GET("/health", s.health)
+		api.GET("/settings", s.getSettings)
+		api.PUT("/settings", s.updateSettings)
 		api.GET("/version", s.version)
 
 		// Setup wizard

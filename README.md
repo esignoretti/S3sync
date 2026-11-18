@@ -100,6 +100,8 @@ Commands:
   config            Manage configuration
     config init     Initialize config database
     config show     Show config path
+    config get      Read a global setting
+    config set      Write a global setting
 
   bucket            Manage bucket configurations
     bucket add      Add a bucket (--endpoint, --region, --bucket-name,
@@ -201,6 +203,8 @@ All responses wrapped in `{"data": ...}` envelope. Errors return `{"error": "...
 |--------|------|-------------|
 | GET | `/api/health` | Health check |
 | GET | `/api/version` | Version info |
+| GET | `/api/settings` | Read global settings |
+| PUT | `/api/settings` | Write a global setting (422 `invalid_setting`) |
 
 ### Setup Wizard
 
@@ -226,12 +230,15 @@ Sync engine per pair (goroutine):
 
 Worker pool:
   N goroutines pull from buffered action channel
-  Each action: throttle.Wait → HEAD source (size guard, attributes) → CopyObject / DeleteObject
+  Each action: throttle.Wait → HEAD source (size guard, attributes)
+             → CopyObject (≤ 5 GiB) or multipart UploadPartCopy (> 5 GiB)
+             → DeleteObject
   Token-bucket rate limiter per pair
 
 Only successfully transferred objects are cached.
 Failed objects retry on next cycle.
-Source objects over 5 GiB fail with ErrObjectTooLarge — multipart copy is not implemented.
+Source objects over 5 TiB fail with ErrObjectTooLarge — that is the endpoint's
+hard object limit, so no copy path can move them.
 ```
 
 ### Sync Cycle Details
@@ -320,6 +327,17 @@ Creation and update return non-blocking warnings rather than failing:
 **Target bucket:** On first sync, engine checks if target exists. If not, creates it with source region, enables versioning and object lock if configured. If it exists, the preflight verifies lock state and rewrites the lifecycle configuration; mismatches are reported as errors rather than silently ignored. Provisioning runs once per engine instance, so a failed provision fails that run instead of being logged and skipped. `pair update` never recreates a target — only `pair add` with `--on-lock-missing recreate --force-recreate` can, and only an empty bucket.
 
 **Credentials in the API:** `POST /api/buckets` binds `config.Bucket`, whose `AccessKey`/`SecretKey` are `json:"-"`, so credentials cannot be supplied on that endpoint — a bucket created there has none and will fail with `static credentials are empty`. Add credentialed buckets with `bucket add` on the CLI or through the setup wizard (`POST /api/setup`), whose `SetupInput` does accept `access_key`/`secret_key`. Credentials are never returned by any endpoint.
+
+**Run timeout:** A global setting, read at the start of every run, so a change applies to the next run of every pair without a restart:
+
+```bash
+s3sync config get run_timeout_seconds
+s3sync config set run_timeout_seconds 1800   # 30..86400, default 300
+```
+
+It bounds one whole sync cycle: the listing, the diff, the copies, and the drift sweep. The sweep gets at most a quarter of it, so a large cache cannot consume the budget the copies need; a sweep that runs out of time resumes from where it stopped on the next run instead of re-walking from the front.
+
+**Large objects:** objects above 5 GiB are copied with sequential `UploadPartCopy` calls, part size chosen to keep the count under the endpoint's 10,000-part ceiling. How large an object can actually be moved depends on the run timeout, because the parts are copied one after another: a 5 TiB object is 10,000 part copies, roughly 8–14 hours at 3–5 s per part, so only about 100–200 GiB completes inside the 300 s default. A copy that does not finish inside the run is aborted — orphaned parts have no lifecycle rule to reap them, so the abort is deliberate — and restarts from part 1 on the next cycle. Raise `run_timeout_seconds` for multi-hundred-GiB objects.
 
 **Throttling:** Each sync pair sets `max_get_ops_per_minute`. Token bucket limits GET/HEAD ops on source. 0 = unlimited.
 

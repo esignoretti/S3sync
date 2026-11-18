@@ -344,3 +344,50 @@ func TestUpdatePairRestartsRunningEngine(t *testing.T) {
 		t.Fatalf("stored expiry = %v, want a future date", stored.TargetExpireAt)
 	}
 }
+
+// The run timeout is a global setting read at the start of every run, so the API
+// has to be able to change it without a restart. The range check is what keeps a
+// typo from silently making every run time out immediately.
+func TestSettingsRoundTrip(t *testing.T) {
+	db, err := config.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repo := config.NewRepository(db)
+	srv, err := api.NewServer(repo, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := srv.Router()
+
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		var r *http.Request
+		if body == "" {
+			r, _ = http.NewRequest(method, path, nil)
+		} else {
+			r, _ = http.NewRequest(method, path, strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+		}
+		router.ServeHTTP(w, r)
+		return w
+	}
+
+	if w := call("GET", "/api/settings", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "300") {
+		t.Fatalf("default GET /api/settings = %d %s, want 200 with 300", w.Code, w.Body.String())
+	}
+	if w := call("PUT", "/api/settings", `{"run_timeout_seconds": 1800}`); w.Code != 200 {
+		t.Fatalf("PUT /api/settings = %d, body %s", w.Code, w.Body.String())
+	}
+	if w := call("GET", "/api/settings", ""); !strings.Contains(w.Body.String(), "1800") {
+		t.Fatalf("GET /api/settings = %s, want run_timeout_seconds 1800", w.Body.String())
+	}
+	if w := call("PUT", "/api/settings", `{"run_timeout_seconds": 5}`); w.Code != 422 ||
+		!strings.Contains(w.Body.String(), "invalid_setting") {
+		t.Fatalf("out-of-range PUT = %d %s, want 422 invalid_setting", w.Code, w.Body.String())
+	}
+	if w := call("PUT", "/api/settings", `{}`); w.Code != 400 {
+		t.Fatalf("empty PUT = %d, want 400", w.Code)
+	}
+}
