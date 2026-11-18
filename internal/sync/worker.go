@@ -58,6 +58,11 @@ const (
 	maxPartSize            = 5 << 30
 )
 
+// copyRequestTimeout bounds each individual request of a copy, not the whole
+// object. A variable rather than a constant only so a test can shrink it and
+// prove the tag write does not inherit the copy's spent deadline.
+var copyRequestTimeout = 30 * time.Second
+
 func NewWorkerPool(workers int, srcClient, tgtClient *s3.Client, source, target string,
 	throttler *Throttler, storageClass string, progress *Progress, replicateAttrs bool) *WorkerPool {
 	return &WorkerPool{
@@ -156,15 +161,19 @@ func (wp *WorkerPool) Run(ctx context.Context, actions <-chan SyncAction) ([]Syn
 // empty AttrsHash means the attribute state is unknown (replication off, or a
 // partial application), never that it matches.
 func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction, error) {
-	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	// Each request gets its own bounded context, taken as it is needed rather
+	// than once for the whole object. A shared deadline set here would already be
+	// spent by the time the tag write runs on a multi-GiB multipart copy, so the
+	// characteristics of every large object would be silently left pending.
+	headCtx, headCancel := context.WithTimeout(ctx, copyRequestTimeout)
+	defer headCancel()
 
 	// HEAD the source, not the target: ContentLength (and the attributes worth
 	// replicating) lives on the source, and the differ has already decided this
 	// object needs copying. Probing the target here duplicated that decision and
 	// treated the 404 a brand-new key always produces as a retryable failure, so
 	// CopyObject was never issued for new objects.
-	headOut, err := wp.headSource(reqCtx, a.Key)
+	headOut, err := wp.headSource(headCtx, a.Key)
 	if err != nil {
 		return a, err
 	}
@@ -196,7 +205,9 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction,
 		// No target-side ETag comparison: the differ already decided this object
 		// differs, and the target does not evaluate x-amz-copy-source-if-match,
 		// so a conditional copy would buy nothing.
-		copyOut, err := wp.copyBytes(reqCtx, a.Key, attrs)
+		copyCtx, copyCancel := context.WithTimeout(ctx, copyRequestTimeout)
+		defer copyCancel()
+		copyOut, err := wp.copyBytes(copyCtx, a.Key, attrs)
 		if err != nil {
 			return a, err
 		}
@@ -208,7 +219,9 @@ func (wp *WorkerPool) copyObject(ctx context.Context, a SyncAction) (SyncAction,
 	if !wp.replicateAttrs {
 		return a, nil
 	}
-	attrs, ok := wp.writeAttrs(reqCtx, a.Key, attrs, versionID)
+	attrsCtx, attrsCancel := context.WithTimeout(ctx, copyRequestTimeout)
+	defer attrsCancel()
+	attrs, ok := wp.writeAttrs(attrsCtx, a.Key, attrs, versionID)
 	if !ok {
 		// The bytes are correct; only the characteristics are incomplete. Retrying
 		// the copy would re-copy bytes for no reason, so this is a pending state.

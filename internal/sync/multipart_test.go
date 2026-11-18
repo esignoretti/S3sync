@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 func TestMultipartPartSize(t *testing.T) {
@@ -223,5 +224,44 @@ func TestMultipartPartRangesCoverObjectExactly(t *testing.T) {
 		if parts > maxMultipartParts {
 			t.Errorf("size %d: %d parts", size, parts)
 		}
+	}
+}
+
+// The tag write happens AFTER the bytes move. On a multi-GiB multipart copy that
+// is minutes later, so a deadline taken once for the whole object would already
+// be spent: the tag write would fail with DeadlineExceeded and the object would
+// be marked attrs_pending, which is silent — the bytes are right, so nothing
+// retries the copy. Each request needs its own bounded context.
+func TestCopyObjectMultipartTagWriteHasItsOwnDeadline(t *testing.T) {
+	api := &fakeCopyAPI{
+		headLen: maxCopyObjectSize + 1,
+		headOut: &s3.HeadObjectOutput{ContentLength: aws.Int64(maxCopyObjectSize + 1)},
+		tags:    []s3types.Tag{{Key: aws.String("team"), Value: aws.String("alpha")}},
+	}
+	// Shrink the per-request deadline and burn more than it inside the copy, so a
+	// single deadline taken once for the whole object is provably spent by the
+	// time the tag write runs. With the real 30s it would take a real 30s copy to
+	// show the bug, and the test would pass either way.
+	restore := copyRequestTimeout
+	copyRequestTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { copyRequestTimeout = restore })
+	api.completeHook = func() { time.Sleep(400 * time.Millisecond) }
+
+	wp := newTestWorkerPool(api)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	action, err := wp.copyObject(ctx, SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`})
+	if err != nil {
+		t.Fatalf("copyObject returned %v", err)
+	}
+	if action.PendingAttrs {
+		t.Fatalf("attributes were left pending after a multipart copy: the tag write ran on a spent deadline")
+	}
+	if api.putTags != 1 {
+		t.Fatalf("PutObjectTagging calls = %d, want 1", api.putTags)
+	}
+	if action.AttrsHash == "" {
+		t.Fatal("no fingerprint recorded after a multipart copy, so the sweep would re-copy forever")
 	}
 }

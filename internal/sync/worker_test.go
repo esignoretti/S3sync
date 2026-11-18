@@ -55,6 +55,7 @@ type fakeCopyAPI struct {
 	cancelAfterPart  int
 	cancelFunc       context.CancelFunc
 	completedParts   int
+	completeHook     func()
 	aborted          int
 	abortUploadID    string
 	abortContextLive bool
@@ -116,6 +117,9 @@ func (f *fakeCopyAPI) CompleteMultipartUpload(_ context.Context, in *s3.Complete
 	if in.MultipartUpload != nil {
 		f.completedParts = len(in.MultipartUpload.Parts)
 	}
+	if f.completeHook != nil {
+		f.completeHook()
+	}
 	return &s3.CompleteMultipartUploadOutput{}, nil
 }
 
@@ -163,7 +167,12 @@ func (f *fakeCopyAPI) CopyObject(_ context.Context, in *s3.CopyObjectInput, _ ..
 	return &s3.CopyObjectOutput{}, nil
 }
 
-func (f *fakeCopyAPI) GetObjectTagging(_ context.Context, in *s3.GetObjectTaggingInput, _ ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error) {
+func (f *fakeCopyAPI) GetObjectTagging(ctx context.Context, in *s3.GetObjectTaggingInput, _ ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error) {
+	// A real client fails immediately on a spent context; a fake that ignores it
+	// cannot reproduce the bug that a shared deadline causes.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.getTags++
 	f.getTagsIn = in
 	if f.getTagsErr != nil {
@@ -172,7 +181,10 @@ func (f *fakeCopyAPI) GetObjectTagging(_ context.Context, in *s3.GetObjectTaggin
 	return &s3.GetObjectTaggingOutput{TagSet: f.tags}, nil
 }
 
-func (f *fakeCopyAPI) PutObjectTagging(_ context.Context, in *s3.PutObjectTaggingInput, _ ...func(*s3.Options)) (*s3.PutObjectTaggingOutput, error) {
+func (f *fakeCopyAPI) PutObjectTagging(ctx context.Context, in *s3.PutObjectTaggingInput, _ ...func(*s3.Options)) (*s3.PutObjectTaggingOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.putTags++
 	f.putTagsIn = in
 	if in.Tagging != nil {
