@@ -1111,3 +1111,51 @@ func TestWorkerPoolRun_CleanCopyIsNotPending(t *testing.T) {
 		t.Fatalf("Completed = %d, want 1", completed)
 	}
 }
+
+// TestCopyObjectEscapesCopySource covers a key containing a percent sign. The
+// SDK does not escape CopySource, so building it with fmt.Sprintf("%s/%s")
+// sends "percent%20.txt" verbatim, the endpoint decodes %20 as a space, and the
+// copy answers 404 NoSuchKey — the object can never be copied and fails every
+// cycle. Verified against live Cubbit DS3: raw → 404, escaped → 200.
+func TestCopyObjectEscapesCopySource(t *testing.T) {
+	api := &fakeCopyAPI{headLen: 4}
+	wp := newTestWorkerPoolWithoutAttrs(api)
+	wp.sourceBucket = "src"
+	wp.targetBucket = "tgt"
+
+	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "percent%20.txt"}); err != nil {
+		t.Fatalf("copyObject: %v", err)
+	}
+	if api.copyIn == nil {
+		t.Fatal("CopyObject was never issued")
+	}
+	if got, want := aws.ToString(api.copyIn.CopySource), "src/percent%2520.txt"; got != want {
+		t.Fatalf("CopySource = %q, want %q", got, want)
+	}
+	// The object key itself is sent as a query parameter and must NOT be
+	// escaped twice — the SDK handles that.
+	if got, want := aws.ToString(api.copyIn.Key), "percent%20.txt"; got != want {
+		t.Fatalf("Key = %q, want %q", got, want)
+	}
+}
+
+// TestCopySourceEscapesAwkwardKeys pins the helper's behaviour across every
+// shape the scenario suite seeds, including the slashes that must stay literal.
+func TestCopySourceEscapesAwkwardKeys(t *testing.T) {
+	cases := []struct{ bucket, key, want string }{
+		{"b", "plain.txt", "b/plain.txt"},
+		{"b", "a/b", "b/a/b"},
+		{"b", "with space.txt", "b/with%20space.txt"},
+		{"b", "plus+sign.txt", "b/plus+sign.txt"},
+		{"b", "percent%20.txt", "b/percent%2520.txt"},
+		{"b", "unicode-é.txt", "b/unicode-%C3%A9.txt"},
+		{"b", "hash#tag.txt", "b/hash%23tag.txt"},
+		{"b", "quest?ion.txt", "b/quest%3Fion.txt"},
+		{"b", "deep/a/b/c/d.txt", "b/deep/a/b/c/d.txt"},
+	}
+	for _, c := range cases {
+		if got := copySource(c.bucket, c.key); got != c.want {
+			t.Fatalf("copySource(%q, %q) = %q, want %q", c.bucket, c.key, got, c.want)
+		}
+	}
+}

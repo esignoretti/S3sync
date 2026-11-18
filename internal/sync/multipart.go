@@ -103,7 +103,7 @@ func (wp *WorkerPool) copyMultipart(ctx context.Context, a SyncAction, attrs Obj
 				Key:             &a.Key,
 				UploadId:        &uploadID,
 				PartNumber:      &partNumber,
-				CopySource:      ptr(fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)),
+				CopySource:      ptr(copySource(wp.sourceBucket, a.Key)),
 				CopySourceRange: &rng,
 			})
 			if err != nil {

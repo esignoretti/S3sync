@@ -9,12 +9,15 @@ package scenario
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +30,7 @@ import (
 
 	"github.com/esignoretti/S3sync/internal/cache"
 	appconfig "github.com/esignoretti/S3sync/internal/config"
+	appsync "github.com/esignoretti/S3sync/internal/sync"
 )
 
 // scenarioRequestTimeout bounds one request from the scenario client. The
@@ -119,13 +123,44 @@ func destroyBucket(t *testing.T, client *s3.Client, name string) {
 		if err != nil {
 			t.Fatalf("list versions of %q: %v", name, err)
 		}
+		// Deletions run in parallel: one request to this endpoint costs ~750ms,
+		// so tearing down a 1,200-object scenario serially would take 15
+		// minutes and dominate the whole suite's runtime.
+		type target struct {
+			key       string
+			versionID *string
+		}
+		var batch []target
 		for _, v := range out.Versions {
-			deleteVersion(t, client, name, aws.ToString(v.Key), v.VersionId)
+			batch = append(batch, target{aws.ToString(v.Key), v.VersionId})
 		}
 		// A delete marker holds a VersionId that must itself be deleted, or the
 		// bucket never empties.
 		for _, d := range out.DeleteMarkers {
-			deleteVersion(t, client, name, aws.ToString(d.Key), d.VersionId)
+			batch = append(batch, target{aws.ToString(d.Key), d.VersionId})
+		}
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 24)
+		var mu sync.Mutex
+		var delErr error
+		for _, tg := range batch {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(tg target) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if err := deleteVersionErr(client, name, tg.key, tg.versionID); err != nil {
+					mu.Lock()
+					if delErr == nil {
+						delErr = err
+					}
+					mu.Unlock()
+				}
+			}(tg)
+		}
+		wg.Wait()
+		if delErr != nil {
+			t.Fatalf("%v", delErr)
 		}
 		if !aws.ToBool(out.IsTruncated) {
 			break
@@ -181,19 +216,18 @@ func destroyBucket(t *testing.T, client *s3.Client, name string) {
 	t.Fatalf("bucket %q still exists after teardown", name)
 }
 
-// deleteVersion removes one object version, bypassing governance retention if
-// the endpoint says the version is held. A COMPLIANCE hold cannot be bypassed,
-// so it fails loudly with the retain-until date instead of hanging the suite.
-func deleteVersion(t *testing.T, client *s3.Client, bucket, key string, versionID *string) {
-	t.Helper()
+// deleteVersionErr removes one object version, bypassing governance retention
+// if the endpoint says the version is held. A COMPLIANCE hold cannot be
+// bypassed, so it fails with the retain-until date instead of hanging the suite.
+func deleteVersionErr(client *s3.Client, bucket, key string, versionID *string) error {
 	ctx := context.Background()
 	del := &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), VersionId: versionID}
 	if _, err := client.DeleteObject(ctx, del); err == nil {
-		return
+		return nil
 	}
 	del.BypassGovernanceRetention = aws.Bool(true)
 	if _, err := client.DeleteObject(ctx, del); err == nil {
-		return
+		return nil
 	}
 
 	var until string
@@ -202,7 +236,7 @@ func deleteVersion(t *testing.T, client *s3.Client, bucket, key string, versionI
 	}); err == nil && head.ObjectLockRetainUntilDate != nil {
 		until = head.ObjectLockRetainUntilDate.Format(time.RFC3339)
 	}
-	t.Fatalf("cannot delete %q version %q from %q (retained until %q): a COMPLIANCE hold cannot be bypassed",
+	return fmt.Errorf("cannot delete %q version %q from %q (retained until %q): a COMPLIANCE hold cannot be bypassed",
 		key, aws.ToString(versionID), bucket, until)
 }
 
@@ -301,6 +335,10 @@ type scenarioEnv struct {
 
 	Store *cache.Store
 
+	// Counter tallies S3 operations by kind so a scenario can assert on wire
+	// traffic instead of on reported success.
+	Counter *countingTransport
+
 	srcBucket *appconfig.Bucket
 	tgtBucket *appconfig.Bucket
 	srcClient *s3.Client
@@ -331,12 +369,12 @@ func newScenarioEnv(t *testing.T, opts envOptions) *scenarioEnv {
 // proves nothing.
 func newScenarioEnvWithBuckets(t *testing.T, client *s3.Client, src, tgt string, opts ...envOptions) (*scenarioEnv, error) {
 	t.Helper()
-	o := envOptions{WorkerCount: 4}
+	o := envOptions{WorkerCount: 16}
 	if len(opts) > 0 {
 		o = opts[0]
 	}
 	if o.WorkerCount <= 0 {
-		o.WorkerCount = 4
+		o.WorkerCount = 16
 	}
 
 	if keys, err := listAll(t, client, src); err != nil {
@@ -365,13 +403,40 @@ func newScenarioEnvWithBuckets(t *testing.T, client *s3.Client, src, tgt string,
 	}
 	t.Cleanup(func() { store.Close() })
 
+	// Both clients share one counting transport, so a copy in either direction
+	// is tallied. The transport wraps the scenario HTTP client's transport so
+	// the counting is per-request, not per-SDK-call.
+	counter := newCountingTransport(&http.Transport{
+		ResponseHeaderTimeout: 60 * time.Second,
+		ExpectContinueTimeout: 5 * time.Second,
+		MaxIdleConnsPerHost:   32,
+	})
+	countedCfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			os.Getenv("S3_TEST_ACCESS_KEY"), os.Getenv("S3_TEST_SECRET_KEY"), "")),
+		config.WithHTTPClient(&http.Client{Timeout: scenarioRequestTimeout, Transport: counter}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load counted aws config: %w", err)
+	}
+	newCounted := func() *s3.Client {
+		return s3.NewFromConfig(countedCfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(os.Getenv("S3_TEST_ENDPOINT"))
+			o.UsePathStyle = true
+		})
+	}
+
 	e := &scenarioEnv{
-		T:        t,
-		Client:   client,
-		Source:   src,
-		Target:   tgt,
-		CacheDir: cacheDir,
-		Store:    store,
+		T:         t,
+		Client:    client,
+		Source:    src,
+		Target:    tgt,
+		CacheDir:  cacheDir,
+		Store:     store,
+		Counter:   counter,
+		srcClient: newCounted(),
+		tgtClient: newCounted(),
 		srcBucket: &appconfig.Bucket{
 			Name: "src", Endpoint: os.Getenv("S3_TEST_ENDPOINT"), Region: "us-east-1",
 			AccessKey: os.Getenv("S3_TEST_ACCESS_KEY"), SecretKey: os.Getenv("S3_TEST_SECRET_KEY"),
@@ -430,4 +495,361 @@ func listAll(t *testing.T, client *s3.Client, bucket string) ([]string, error) {
 		}
 		token = out.NextContinuationToken
 	}
+}
+
+// engineTimeout is the per-run budget for scenario syncs. Large-object
+// scenarios need more than the 300s production default.
+const engineTimeout = 3600
+
+// newEngine builds the production engine for this scenario's world. Nothing is
+// stubbed: the differ, worker pool, multipart path and provisioning are the
+// shipped ones, so a green assertion here is an assertion about shipped code.
+func (e *scenarioEnv) newEngine() *appsync.Engine {
+	return appsync.NewEngine(e.Pair, e.srcBucket, e.tgtBucket, e.srcClient, e.tgtClient, e.Store,
+		func() appconfig.Settings { return appconfig.Settings{RunTimeoutSeconds: engineTimeout} })
+}
+
+// sync runs one full sync and fails the test if the engine returns an error.
+func (e *scenarioEnv) sync() {
+	e.T.Helper()
+	if err := e.newEngine().RunOnce(context.Background()); err != nil {
+		e.T.Fatalf("sync: %v", err)
+	}
+}
+
+// syncExpectingError runs one sync and returns the error instead of failing, for
+// scenarios that assert a run is refused.
+func (e *scenarioEnv) syncExpectingError() error {
+	e.T.Helper()
+	return e.newEngine().RunOnce(context.Background())
+}
+
+// assertNoWorkOnSecondSync is the idempotence assertion and the reason this
+// suite exists. Counting requests is deliberately stronger than reading
+// Engine.LastResult(): a copy that happens and is then cached reports success,
+// which is exactly the shape of the dry-run-poisoning and stale-fingerprint
+// bugs this suite is meant to catch.
+func (e *scenarioEnv) assertNoWorkOnSecondSync() {
+	e.T.Helper()
+	e.Counter.Reset()
+	e.sync()
+	copies := e.Counter.Count(kindCopyObject) + e.Counter.Count(kindUploadPartCopy) + e.Counter.Count(kindPutObject)
+	if copies != 0 {
+		e.T.Fatalf("second sync copied %d objects, want 0 (%s)", copies, e.Counter.Summary())
+	}
+}
+
+// targetKeys lists the target with full pagination.
+func (e *scenarioEnv) targetKeys() []string {
+	e.T.Helper()
+	keys, err := listAll(e.T, e.Client, e.Target)
+	if err != nil {
+		e.T.Fatalf("list target: %v", err)
+	}
+	return keys
+}
+
+// assertTargetCount requires an exact object count in the target.
+func (e *scenarioEnv) assertTargetCount(want int) {
+	e.T.Helper()
+	keys := e.targetKeys()
+	if len(keys) != want {
+		e.T.Fatalf("target holds %d objects, want %d: %v", len(keys), want, keys)
+	}
+}
+
+// assertBytesMatch proves the target object's bytes are the source's bytes. The
+// expected digest is recomputed from the key and size rather than downloaded
+// from the source, so the assertion cannot pass merely because both sides are
+// equally wrong.
+func (e *scenarioEnv) assertBytesMatch(key string) {
+	e.T.Helper()
+	ctx := context.Background()
+
+	head, err := e.Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(e.Target), Key: aws.String(key),
+	})
+	if err != nil {
+		e.T.Fatalf("head target %q: %v", key, err)
+	}
+	size := aws.ToInt64(head.ContentLength)
+
+	got, err := digestOfObject(ctx, e.Client, e.Target, key)
+	if err != nil {
+		e.T.Fatalf("digest target %q: %v", key, err)
+	}
+	want, ok := e.literalDigest[key]
+	if !ok {
+		want = synthChecksum(key, size)
+	}
+	if got != want {
+		e.T.Fatalf("target %q has digest %x, want %x (size %d)", key, got, want, size)
+	}
+}
+
+// objectFacts is every replicated characteristic of one object.
+type objectFacts struct {
+	ContentType   string
+	Metadata      map[string]string
+	Tags          map[string]string
+	RetentionMode string
+	RetainUntil   *time.Time
+	LegalHold     string
+}
+
+// fetchFacts reads one object's characteristics. Tags need a separate call
+// because HeadObject never returns them on this endpoint.
+func fetchFacts(t *testing.T, client *s3.Client, bucket, key string) objectFacts {
+	t.Helper()
+	ctx := context.Background()
+	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	if err != nil {
+		t.Fatalf("head %q in %q: %v", key, bucket, err)
+	}
+	f := objectFacts{
+		ContentType:   aws.ToString(head.ContentType),
+		Metadata:      head.Metadata,
+		RetentionMode: string(head.ObjectLockMode),
+		RetainUntil:   head.ObjectLockRetainUntilDate,
+		LegalHold:     string(head.ObjectLockLegalHoldStatus),
+	}
+	tags, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	if err != nil {
+		t.Fatalf("get tags of %q in %q: %v", key, bucket, err)
+	}
+	f.Tags = map[string]string{}
+	for _, tag := range tags.TagSet {
+		f.Tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+	return f
+}
+
+// assertFactsMatch compares source characteristics to target characteristics
+// field by field, naming the key and field in the failure.
+func (e *scenarioEnv) assertFactsMatch(key string) {
+	e.T.Helper()
+	src := fetchFacts(e.T, e.Client, e.Source, key)
+	tgt := fetchFacts(e.T, e.Client, e.Target, key)
+
+	if src.ContentType != tgt.ContentType {
+		e.T.Fatalf("key %q: content-type = %q, want %q", key, tgt.ContentType, src.ContentType)
+	}
+	for k, v := range src.Metadata {
+		if tgt.Metadata[k] != v {
+			e.T.Fatalf("key %q: metadata %q = %q, want %q", key, k, tgt.Metadata[k], v)
+		}
+	}
+	for k := range tgt.Metadata {
+		if _, ok := src.Metadata[k]; !ok {
+			e.T.Fatalf("key %q: target has extra metadata %q = %q", key, k, tgt.Metadata[k])
+		}
+	}
+	if len(src.Tags) != len(tgt.Tags) {
+		e.T.Fatalf("key %q: %d tags, want %d (%v vs %v)", key, len(tgt.Tags), len(src.Tags), tgt.Tags, src.Tags)
+	}
+	for k, v := range src.Tags {
+		if tgt.Tags[k] != v {
+			e.T.Fatalf("key %q: tag %q = %q, want %q", key, k, tgt.Tags[k], v)
+		}
+	}
+	if src.RetentionMode != tgt.RetentionMode {
+		e.T.Fatalf("key %q: retention mode = %q, want %q", key, tgt.RetentionMode, src.RetentionMode)
+	}
+	if src.LegalHold != tgt.LegalHold {
+		e.T.Fatalf("key %q: legal hold = %q, want %q", key, tgt.LegalHold, src.LegalHold)
+	}
+	// Retain-until is compared to the second: the endpoint truncates it.
+	if src.RetainUntil != nil && tgt.RetainUntil == nil {
+		e.T.Fatalf("key %q: target lost the retain-until date %s", key, src.RetainUntil)
+	}
+	if src.RetainUntil != nil && tgt.RetainUntil != nil {
+		if d := src.RetainUntil.Sub(*tgt.RetainUntil); d > time.Second || d < -time.Second {
+			e.T.Fatalf("key %q: retain-until = %s, want %s", key, tgt.RetainUntil, src.RetainUntil)
+		}
+	}
+}
+
+// seed writes synthetic objects derived from their keys. Uploads run in
+// parallel because per-request latency, not bandwidth, dominates this
+// endpoint: one small object takes ~1s, so a 5,000-object fixture is only
+// feasible concurrently.
+func (e *scenarioEnv) seed(keys []string) {
+	e.T.Helper()
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for _, key := range keys {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(key string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := e.seedOneErr(key); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}(key)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		e.T.Fatalf("seed: %v", firstErr)
+	}
+}
+
+// seedOne writes one synthetic object and fails the test on error.
+func (e *scenarioEnv) seedOne(key string) {
+	e.T.Helper()
+	if err := e.seedOneErr(key); err != nil {
+		e.T.Fatalf("%v", err)
+	}
+}
+
+// seedOneErr writes one synthetic object sized by its shape.
+//
+// ContentLength is mandatory: this endpoint answers 400 InvalidRequest for a
+// PutObject whose body is non-seekable and has no declared length (it does not
+// accept chunked encoding), and synthReader is deliberately non-seekable so it
+// can stream a 6 GiB fixture in bounded memory.
+func (e *scenarioEnv) seedOneErr(key string) error {
+	size := e.sizeFor(key)
+	_, err := e.Client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket:        aws.String(e.Source),
+		Key:           aws.String(key),
+		Body:          newSynthReader(key, size),
+		ContentLength: aws.Int64(size),
+		ContentType:   aws.String(contentTypeFor(key)),
+	})
+	if err != nil {
+		return fmt.Errorf("seed %q (%d bytes): %w", key, size, err)
+	}
+	return nil
+}
+
+// sizeFor derives an object's size from its key's shape suffix, defaulting to
+// the "small" shape.
+func (e *scenarioEnv) sizeFor(key string) int64 {
+	for _, sh := range shapes {
+		if strings.Contains(key, "-"+sh.Name+".") {
+			return synthSize(key, sh)
+		}
+	}
+	return synthSize(key, shapes[1])
+}
+
+// contentTypeFor gives each shape a distinct content type so a dropped
+// Content-Type is visible.
+func contentTypeFor(key string) string {
+	switch {
+	case strings.Contains(key, "-tiny."), strings.Contains(key, "-small."):
+		return "text/plain"
+	case strings.Contains(key, "-medium."):
+		return "application/json"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// seedCacheOnly writes cache rows with the source's real ETag and LastModified,
+// as if a previous run had synced the keys. Used to make the differ emit an
+// action for a key that no longer exists.
+func (e *scenarioEnv) seedCacheOnly(keys []string) {
+	e.T.Helper()
+	ctx := context.Background()
+	rows := make([]*cache.CachedObject, 0, len(keys))
+	for _, key := range keys {
+		head, err := e.Client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(e.Source), Key: aws.String(key),
+		})
+		if err != nil {
+			e.T.Fatalf("head source %q: %v", key, err)
+		}
+		rows = append(rows, &cache.CachedObject{
+			PairID:       e.Pair.ID,
+			Key:          key,
+			ETag:         aws.ToString(head.ETag),
+			Size:         aws.ToInt64(head.ContentLength),
+			LastModified: aws.ToTime(head.LastModified),
+			SyncedAt:     time.Now().UTC(),
+		})
+	}
+	if err := e.Store.PutMany(rows); err != nil {
+		e.T.Fatalf("seed cache: %v", err)
+	}
+}
+
+// cachedKey reports whether the cache holds a row for key.
+func (e *scenarioEnv) cachedKey(key string) (cache.CachedObject, bool) {
+	e.T.Helper()
+	rows, err := e.Store.List(e.Pair.ID)
+	if err != nil {
+		e.T.Fatalf("list cache: %v", err)
+	}
+	for _, r := range rows {
+		if r.Key == key {
+			return r, true
+		}
+	}
+	return cache.CachedObject{}, false
+}
+
+// manyKeys returns n small-object keys.
+func manyKeys(n int) []string {
+	keys := make([]string, n)
+	for i := 0; i < n; i++ {
+		keys[i] = synthKey(i, "small")
+	}
+	return keys
+}
+
+// deleteFromSource removes keys from the source bucket.
+func deleteFromSource(t *testing.T, client *s3.Client, bucket string, keys []string) {
+	t.Helper()
+	for _, key := range keys {
+		if _, err := client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String(key),
+		}); err != nil {
+			t.Fatalf("delete %q: %v", key, err)
+		}
+	}
+}
+
+// digestOfObject streams one object through SHA-256.
+func digestOfObject(ctx context.Context, client *s3.Client, bucket, key string) ([32]byte, error) {
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	defer out.Body.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, out.Body); err != nil {
+		return [32]byte{}, err
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
+}
+
+// digestOf is the SHA-256 of a literal body.
+func digestOf(body string) [32]byte {
+	return sha256.Sum256([]byte(body))
+}
+
+// contains reports membership.
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }

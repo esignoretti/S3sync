@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -349,13 +351,13 @@ func (wp *WorkerPool) headSource(ctx context.Context, key string) (*s3.HeadObjec
 // copyBytes issues the CopyObject that moves the bytes. With attribute
 // replication off it builds exactly the legacy request.
 func (wp *WorkerPool) copyBytes(ctx context.Context, key string, attrs ObjectAttrs) (*s3.CopyObjectOutput, error) {
-	copySource := fmt.Sprintf("%s/%s", wp.sourceBucket, key)
+	cs := copySource(wp.sourceBucket, key)
 	var copyOut *s3.CopyObjectOutput
 	err := retryS3(ctx, "CopyObject", func(c context.Context) error {
 		if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
 			return err
 		}
-		out, err := wp.tgt.CopyObject(c, wp.copyRequest(key, copySource, attrs))
+		out, err := wp.tgt.CopyObject(c, wp.copyRequest(key, cs, attrs))
 		copyOut = out
 		return err
 	}, 3)
@@ -496,4 +498,16 @@ func retryS3(ctx context.Context, label string, fn func(context.Context) error, 
 		}
 	}
 	return fmt.Errorf("%s failed after %d attempts: %w", label, maxAttempts, err)
+}
+
+// copySource builds the CopySource header value for a source bucket and key.
+//
+// The SDK does not escape CopySource, so a raw "%s/%s" is sent verbatim and the
+// endpoint decodes it: a key like "percent%20.txt" becomes "percent .txt" and
+// CopyObject answers 404 NoSuchKey, so that object can never be copied. Every
+// segment is escaped except the path separators, which must stay literal.
+// Verified against live Cubbit DS3: raw → 404, escaped → 200.
+func copySource(bucket, key string) string {
+	u := &url.URL{Path: bucket + "/" + key}
+	return strings.ReplaceAll(u.EscapedPath(), "%2F", "/")
 }
