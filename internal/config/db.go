@@ -67,6 +67,16 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
+	// Global settings live in their own table rather than a config file: the
+	// binary already has a database, and a value the engine reads at the start of
+	// every run must be changeable without a restart or a redeploy.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+
 	// Migrations for columns added after initial schema
 	migrations := []string{
 		`ALTER TABLE sync_pairs ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0`,
