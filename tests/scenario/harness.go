@@ -853,3 +853,13 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// ruleIDs renders a lifecycle configuration's rule IDs for a failure message,
+// so an assertion says which rules exist instead of only how many.
+func ruleIDs(rules []types.LifecycleRule) []string {
+	ids := make([]string, 0, len(rules))
+	for _, r := range rules {
+		ids = append(ids, aws.ToString(r.ID))
+	}
+	return ids
+}
