@@ -92,14 +92,14 @@ func (p *Progress) SetTotal(n int) {
 }
 
 type Engine struct {
-	pair      *config.SyncPair
-	src       *config.Bucket
-	tgt       *config.Bucket
-	srcS3     *s3.Client
-	tgtS3     *s3.Client
-	store     *cache.Store
-	throttler *Throttler
-	pool      *WorkerPool
+	pair       *config.SyncPair
+	src        *config.Bucket
+	tgt        *config.Bucket
+	srcS3      *s3.Client
+	tgtS3      *s3.Client
+	store      *cache.Store
+	throttler  *Throttler
+	pool       *WorkerPool
 	settingsFn func() config.Settings
 
 	mu            sync.Mutex
@@ -126,15 +126,15 @@ func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
 	pool := NewWorkerPool(pair.WorkerCount, srcS3, tgtS3,
 		src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass, progress, pair.ReplicateAttributes)
 	return &Engine{
-		pair:      pair,
-		src:       src,
-		tgt:       tgt,
-		srcS3:     srcS3,
-		tgtS3:     tgtS3,
-		store:     cacheStore,
-		throttler: thr,
-		pool:      pool,
-		progress:  progress,
+		pair:       pair,
+		src:        src,
+		tgt:        tgt,
+		srcS3:      srcS3,
+		tgtS3:      tgtS3,
+		store:      cacheStore,
+		throttler:  thr,
+		pool:       pool,
+		progress:   progress,
 		settingsFn: settingsFn,
 	}
 }
