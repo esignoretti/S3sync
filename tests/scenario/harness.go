@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -230,12 +231,45 @@ func deleteVersionErr(client *s3.Client, bucket, key string, versionID *string) 
 		return nil
 	}
 
-	var until string
-	if head, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+	head, headErr := client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket), Key: aws.String(key), VersionId: versionID,
-	}); err == nil && head.ObjectLockRetainUntilDate != nil {
+	})
+	var until string
+	if headErr == nil && head.ObjectLockRetainUntilDate != nil {
 		until = head.ObjectLockRetainUntilDate.Format(time.RFC3339)
 	}
+
+	// A legal hold blocks deletion regardless of retention, and unlike
+	// COMPLIANCE it CAN be lifted — so lift it and retry once. Without this,
+	// every scenario that seeds a legal hold leaks its bucket.
+	if headErr == nil && head.ObjectLockLegalHoldStatus == types.ObjectLockLegalHoldStatusOn {
+		_, _ = client.PutObjectLegalHold(ctx, &s3.PutObjectLegalHoldInput{
+			Bucket:    aws.String(bucket),
+			Key:       aws.String(key),
+			VersionId: versionID,
+			LegalHold: &types.ObjectLockLegalHold{Status: types.ObjectLockLegalHoldStatusOff},
+		})
+		del.BypassGovernanceRetention = aws.Bool(true)
+		if _, err := client.DeleteObject(ctx, del); err == nil {
+			return nil
+		}
+	}
+
+	// A COMPLIANCE hold cannot be bypassed by anyone, so the only way to remove
+	// the version is to wait for it to expire. Fixtures keep holds short for
+	// exactly this reason; the cap stops a bad fixture from hanging the suite.
+	if headErr == nil && head.ObjectLockRetainUntilDate != nil &&
+		head.ObjectLockMode == types.ObjectLockModeCompliance {
+		wait := time.Until(*head.ObjectLockRetainUntilDate) + 2*time.Second
+		if wait > 0 && wait < 5*time.Minute {
+			time.Sleep(wait)
+			del.BypassGovernanceRetention = aws.Bool(true)
+			if _, err := client.DeleteObject(ctx, del); err == nil {
+				return nil
+			}
+		}
+	}
+
 	return fmt.Errorf("cannot delete %q version %q from %q (retained until %q): a COMPLIANCE hold cannot be bypassed",
 		key, aws.ToString(versionID), bucket, until)
 }
@@ -311,7 +345,11 @@ func deleteTags(t *testing.T, client *s3.Client, bucket, key string) {
 
 // envOptions selects the matrix axes for one scenario's world.
 type envOptions struct {
-	ObjectLock             bool
+	ObjectLock bool
+	// TargetObjectLock overrides ObjectLock for the target bucket. A scenario
+	// that copies a locked object onto an unlocked target needs a locked
+	// SOURCE and an unlocked target, and lock cannot be toggled after creation.
+	TargetObjectLock       *bool
 	Versioning             bool
 	ReplicateAttrs         bool
 	TargetExpireIn         time.Duration
@@ -356,7 +394,11 @@ func newScenarioEnv(t *testing.T, opts envOptions) *scenarioEnv {
 	t.Helper()
 	client, _ := newClient(t)
 	src := createBucket(t, client, opts.ObjectLock)
-	tgt := createBucket(t, client, opts.ObjectLock)
+	targetLock := opts.ObjectLock
+	if opts.TargetObjectLock != nil {
+		targetLock = *opts.TargetObjectLock
+	}
+	tgt := createBucket(t, client, targetLock)
 	e, err := newScenarioEnvWithBuckets(t, client, src, tgt, opts)
 	if err != nil {
 		t.Fatalf("build scenario env: %v", err)
@@ -862,4 +904,57 @@ func ruleIDs(rules []types.LifecycleRule) []string {
 		ids = append(ids, aws.ToString(r.ID))
 	}
 	return ids
+}
+
+// currentVersionID returns the version id of a key's live version. Object lock
+// forces versioning on, so a plain DeleteObject writes a delete marker and
+// returns 204 — proving a hold requires deleting the VERSION itself.
+func currentVersionID(t *testing.T, client *s3.Client, bucket, key string) string {
+	t.Helper()
+	out, err := client.ListObjectVersions(context.Background(), &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucket), Prefix: aws.String(key),
+	})
+	if err != nil {
+		t.Fatalf("list versions of %q in %q: %v", key, bucket, err)
+	}
+	for _, v := range out.Versions {
+		if aws.ToString(v.Key) == key {
+			return aws.ToString(v.VersionId)
+		}
+	}
+	t.Fatalf("no version of %q in %q", key, bucket)
+	return ""
+}
+
+// syncOutcome runs one sync and reports how it ended. A per-object failure does
+// NOT make RunOnce return an error — it sets status "error" and counts the
+// failure — so a scenario that expects objects to be refused must read the
+// status, not the return value.
+type syncOutcome struct {
+	Err     error
+	Status  string
+	Failed  int
+	Succeed int
+	// Log is everything the run wrote to slog. A per-object failure is only
+	// reported here — the engine's last_error is just "N worker(s) failed" — so
+	// a scenario that asserts on WHY an object was refused must read this.
+	Log string
+}
+
+func (e *scenarioEnv) syncOutcome() syncOutcome {
+	e.T.Helper()
+	eng := e.newEngine()
+
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	err := eng.RunOnce(context.Background())
+	slog.SetDefault(prev)
+
+	_, _, status, lastErr, _ := eng.Status()
+	succeeded, failed := eng.LastResult()
+	return syncOutcome{
+		Err: err, Status: status + ": " + lastErr,
+		Failed: failed, Succeed: succeeded, Log: buf.String(),
+	}
 }
