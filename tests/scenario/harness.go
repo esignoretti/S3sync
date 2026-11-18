@@ -1006,3 +1006,9 @@ func copySelfWithMetadata(t *testing.T, client *s3.Client, bucket, key string, m
 		t.Fatalf("rewrite metadata of %q: %v", key, err)
 	}
 }
+
+// midnightUTC returns the UTC midnight days from now, which is the only shape
+// this endpoint accepts for a lifecycle Expiration.Date.
+func midnightUTC(days int) time.Time {
+	return time.Now().UTC().AddDate(0, 0, days).Truncate(24 * time.Hour)
+}
