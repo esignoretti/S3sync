@@ -48,11 +48,17 @@ type fakeSweepAPI struct {
 	// tagHook, when set, runs after the fake records a tag read. It lets a test
 	// act while the sweep is mid-flight (e.g. cancel the context).
 	tagHook func()
+	// headHook, when set, runs after the fake records a head read. Same purpose
+	// as tagHook, for tests that stop the sweep at a HEAD rather than a tag read.
+	headHook func()
 }
 
 func (f *fakeSweepAPI) HeadObject(_ context.Context, in *s3.HeadObjectInput, _ ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
 	key := aws.ToString(in.Key)
 	f.headRead = append(f.headRead, key)
+	if f.headHook != nil {
+		f.headHook()
+	}
 	if err := f.headErrs[key]; err != nil {
 		return nil, err
 	}
@@ -415,5 +421,94 @@ func TestReconcileStopsOnCancel(t *testing.T) {
 	}
 	if len(api.headRead) != 1 {
 		t.Fatalf("HEAD calls = %v, want one: cancellation must land mid-sweep, not before it starts", api.headRead)
+	}
+}
+
+// sweepRig drives the sweep one budget-limited pass at a time. The cursor is the
+// only thing that makes a pass-limit survivable: without it every run re-walks
+// the same prefix, so a cache larger than one budget's worth of work never
+// converges and the drift past the cut-off is invisible forever.
+type sweepRig struct {
+	api *fakeSweepAPI
+	e   *Engine
+}
+
+// sweepOnePass runs one sweep with a context that is cancelled by the fake as
+// soon as it records its headLimit-th HEAD, which is what a budget expiry looks
+// like from inside the sweep.
+func (r *sweepRig) sweepOnePass(t *testing.T, headLimit int) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	heads := 0
+	r.api.headHook = func() {
+		heads++
+		if heads >= headLimit {
+			cancel()
+		}
+	}
+	actions := make(chan SyncAction, 16)
+	err := r.e.reconcileSweep(ctx, actions)
+	r.api.headHook = nil
+	close(actions)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("sweep: %v", err)
+	}
+}
+
+// sweepFixture builds an engine whose cache holds one entry per key, each with a
+// non-empty fingerprint so the sweep actually examines it.
+func sweepFixture(t *testing.T, keys []string) *sweepRig {
+	t.Helper()
+	api := &fakeSweepAPI{}
+	entries := make([]cache.CachedObject, 0, len(keys))
+	for _, k := range keys {
+		entries = append(entries, cache.CachedObject{
+			PairID: "p1", Key: k, ETag: `"e1"`, Size: 1,
+			LastModified: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			// A hash the fake's HEAD will not reproduce, so every examined key
+			// would emit a copy if the sweep reached it.
+			AttrsHash: "stale",
+		})
+	}
+	pair := &config.SyncPair{ID: "p1", Name: "pair", AttrsReconcileInterval: 1}
+	return &sweepRig{api: api, e: newReconcileEngine(t, pair, api, entries...)}
+}
+
+func TestReconcileSweepResumesFromCursor(t *testing.T) {
+	// Three cached entries; each pass's budget allows exactly one HEAD.
+	rig := sweepFixture(t, []string{"a", "b", "c"})
+
+	for pass, want := range []string{"a", "b", "c"} {
+		rig.api.headRead = nil // per-pass, not cumulative
+		rig.sweepOnePass(t, 1)
+		read := rig.api.headRead
+		if len(read) == 0 {
+			t.Fatalf("pass %d read no keys", pass)
+		}
+		if got := read[len(read)-1]; got != want {
+			t.Fatalf("pass %d examined %q, want %q (reads this pass: %v)", pass, got, want, read)
+		}
+		if len(read) != 1 {
+			t.Fatalf("pass %d read %v, want exactly one key: the budget allows one HEAD", pass, read)
+		}
+	}
+}
+
+func TestReconcileSweepCursorResetsOnFullPass(t *testing.T) {
+	rig := sweepFixture(t, []string{"a", "b"})
+	actions := make(chan SyncAction, 16)
+	if err := rig.e.reconcileSweep(context.Background(), actions); err != nil {
+		t.Fatal(err)
+	}
+	close(actions)
+	if got := rig.e.SweepCursor(); got != "" {
+		t.Fatalf("cursor = %q after a full pass, want empty", got)
+	}
+
+	// A full pass must have examined everything, or "reset" would be trivially
+	// true because the cursor never moved.
+	if len(rig.api.headRead) != 2 {
+		t.Fatalf("full pass read %v, want both keys", rig.api.headRead)
 	}
 }

@@ -147,6 +147,8 @@ type engineEndpoint struct {
 	tags           string   // <Tag> entries for a source tag read
 	lockConfigured bool
 	listBlock      chan struct{} // when non-nil, the source listing waits on it
+	headBlockKey   string        // when set, the HEAD for this key waits on headBlock
+	headBlock      chan struct{}
 }
 
 // engineListingObject is one source object whose identity matches
@@ -195,6 +197,14 @@ func (f *engineEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut:
 		w.Header().Set("Content-Type", "application/xml")
 		io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><CopyObjectResult><ETag>"e1"</ETag></CopyObjectResult>`)
+	case r.Method == http.MethodHead && f.headBlockKey != "" && r.URL.Path == "/"+testSourceBucket+"/"+f.headBlockKey:
+		if f.headBlock != nil {
+			<-f.headBlock
+		}
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Length", "1")
+		w.Header().Set("ETag", `"e9"`)
+		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodHead:
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Length", "10")
@@ -203,6 +213,17 @@ func (f *engineEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// sawList reports whether the source bucket was listed, i.e. whether the diff
+// actually started.
+func (f *engineEndpoint) sawList() bool {
+	for _, req := range f.log() {
+		if strings.HasPrefix(req, "GET /"+testSourceBucket+"?list-type=2") {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *engineEndpoint) log() []string {
@@ -483,6 +504,41 @@ func TestRunOnceDryRunDoesNotWriteCache(t *testing.T) {
 	}
 	if len(cached) != 0 {
 		t.Fatalf("cache holds %d objects after a dry run, want 0: %+v", len(cached), cached)
+	}
+}
+
+// A sweep that cannot finish inside its budget must not starve the diff. The
+// sweep's only effect is emitting actions, so a run that spends its whole
+// timeout sweeping copies nothing at all while reporting health.
+func TestRunOnceSweepOverrunStillRunsDiff(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	ep := &engineEndpoint{objects: []string{"a.txt"}}
+	pair := &config.SyncPair{AttrsReconcileInterval: 1}
+	// A 1-second run budget, so a quarter of it (the sweep's share) expires
+	// long before the test would otherwise finish.
+	e := newTestEngineWithSettings(t, pair, ep,
+		func() config.Settings { return config.Settings{RunTimeoutSeconds: 1} })
+
+	stale := cache.CachedObject{
+		PairID: pair.ID, Key: "stale.txt", ETag: `"e9"`, Size: 1,
+		LastModified: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		AttrsHash:    "stale",
+	}
+	if err := e.store.PutMany([]*cache.CachedObject{&stale}); err != nil {
+		t.Fatal(err)
+	}
+	ep.headBlockKey = "stale.txt"
+	ep.headBlock = release
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if pair.LastReconcileAt != nil {
+		t.Fatal("LastReconcileAt was set by a sweep that did not finish")
+	}
+	if !ep.sawList() {
+		t.Fatalf("the diff never listed the source after the sweep overran: %v", ep.log())
 	}
 }
 

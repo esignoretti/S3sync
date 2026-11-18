@@ -113,6 +113,12 @@ type Engine struct {
 	lastFailed    int
 	cancel        context.CancelFunc
 
+	// sweepCursor is the last key the drift sweep fully examined. "" means the
+	// next sweep starts at the front. It is in-memory: a restart re-walks from
+	// the beginning, which is harmless, and persisting it would add a write to
+	// every sweep.
+	sweepCursor string
+
 	setupOnce sync.Once
 	setupErr  error
 }
@@ -137,6 +143,24 @@ func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
 		progress:   progress,
 		settingsFn: settingsFn,
 	}
+}
+
+// SweepCursor reports the sweep's resume point, for tests and diagnostics.
+func (e *Engine) SweepCursor() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sweepCursor
+}
+
+// advanceCursor records how far the sweep got, so a sweep stopped by its budget
+// resumes at the next key instead of re-walking from the front. Without this a
+// cache larger than one budget's worth of work never converges: every run pays
+// the full budget and examines the same prefix, so drift past the cut-off is
+// invisible forever.
+func (e *Engine) advanceCursor(key string) {
+	e.mu.Lock()
+	e.sweepCursor = key
+	e.mu.Unlock()
 }
 
 // settings returns the current global settings. It is called at the start of
@@ -259,10 +283,20 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	// channel), and it must not run inline either, because it can emit more
 	// actions than the buffer holds while nothing is reading yet. The consumer
 	// below therefore starts before either producer.
-	sweepDue := ShouldReconcile(e.pair, time.Now().UTC())
+	// The sweep gets a share of the run budget, not all of it: an uncapped sweep
+	// over a large cache can spend the entire timeout and leave the diff with
+	// nothing, so no object is ever copied while the sweep reports health.
+	// Expiring here degrades to "the sweep did less work this run" — the cursor
+	// makes that recoverable — and the diff still runs.
+	sweepDue := ShouldReconcile(e.pair, time.Now().UTC()) && !e.pair.DryRun
 	sweepErrCh := make(chan error, 1)
 	if sweepDue {
-		go func() { sweepErrCh <- e.reconcileSweep(ctx, actions) }()
+		sweepBudget := runTimeout / 4
+		go func() {
+			sweepCtx, sweepCancel := context.WithTimeout(ctx, sweepBudget)
+			defer sweepCancel()
+			sweepErrCh <- e.reconcileSweep(sweepCtx, actions)
+		}()
 	}
 
 	listPage := func(ctx context.Context, token *string) (*s3.ListObjectsV2Output, error) {

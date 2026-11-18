@@ -52,39 +52,63 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 		return nil
 	}
 
+	// Resume where the last budget-limited pass stopped. A sweep that cannot
+	// finish inside its budget must still make progress: restarting from the
+	// front every run means the tail of a large cache is never examined.
+	e.mu.Lock()
+	cursor := e.sweepCursor
+	e.mu.Unlock()
+
 	emitted := 0
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if cursor != "" && entry.Key <= cursor {
+			continue
+		}
 		if entry.AttrsHash == "" {
+			e.advanceCursor(entry.Key)
 			continue
 		}
 
 		headOut, err := e.pool.headSource(ctx, entry.Key)
 		if err != nil {
 			// One unreadable object must not abort the sweep: the rest of the
-			// bucket still needs checking. The next sweep re-reads this one.
+			// bucket still needs checking. A transient error leaves the cursor
+			// where it is so the next sweep retries this key; a budget expiry
+			// must not, or every run would spend its budget on the same object
+			// and the sweep would never move.
 			slog.Warn("reconcile: head source", "key", entry.Key, "error", err)
+			if ctx.Err() != nil {
+				e.advanceCursor(entry.Key)
+			}
 			continue
 		}
 		if headOut == nil {
 			// Vanished since the copy. Not drift, and the differ reports the
 			// deletion; a tag read would only repeat the same 404.
 			slog.Debug("reconcile: source object vanished", "key", entry.Key)
+			e.advanceCursor(entry.Key)
 			continue
 		}
 
 		tags, err := e.pool.readTags(ctx, entry.Key)
 		if err != nil {
 			// The object is probably fine; the read was not. Emitting an action
-			// here would fabricate drift out of a transient failure.
+			// here would fabricate drift out of a transient failure. As above:
+			// a transient error retries this key next sweep, a budget expiry
+			// advances past it so the sweep makes progress.
 			slog.Warn("reconcile: read source tags", "key", entry.Key, "error", err)
+			if ctx.Err() != nil {
+				e.advanceCursor(entry.Key)
+			}
 			continue
 		}
 		attrs := e.pool.effectiveAttrs(entry.Key, headOut).withTags(tags)
 
 		if attrs.Hash() == entry.AttrsHash {
+			e.advanceCursor(entry.Key)
 			continue
 		}
 
@@ -97,9 +121,29 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 		}:
 			emitted++
 		case <-ctx.Done():
+			// The key WAS examined, so the cursor advances even though the
+			// action could not be delivered: leaving it here would spend every
+			// future budget on this same object and the sweep would never move
+			// past it. The repair is picked up on the next full pass.
+			e.advanceCursor(entry.Key)
 			return ctx.Err()
 		}
+		e.advanceCursor(entry.Key)
 	}
+
+	// A budget expiry is not a completed sweep. Returning nil here would make
+	// the caller stamp LastReconcileAt as if the whole cache had been examined,
+	// deferring the next sweep by a full interval and hiding the drift this
+	// sweep never reached.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Reaching the end of the list means the whole cache has been examined, so
+	// the next sweep starts over from the front.
+	e.mu.Lock()
+	e.sweepCursor = ""
+	e.mu.Unlock()
 
 	if emitted > 0 {
 		slog.Info("reconcile sweep", "pair", e.pair.Name, "objects", len(entries), "drifted", emitted)
