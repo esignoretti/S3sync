@@ -91,18 +91,27 @@ func putObject(t *testing.T, client *s3.Client, bucket, key, body string, mutate
 // extra GetObjectTagging/PutObjectTagging round-trip per object is waste — but
 // if it silently stops honouring it while we assume it does, every replicated
 // object loses its tags with no error anywhere.
+// TestDS3Claim_CopyIgnoresInlineTagging pins the claim the writer depends on:
+// an INLINE x-amz-tagging header on CopyObject is not applied.
+//
+// The source's tags must be set with PutObjectTagging, not with an inline
+// Tagging field on PutObject — that header is ignored too, so a source seeded
+// that way has no tags and the copy proves nothing either way.
 func TestDS3Claim_CopyIgnoresInlineTagging(t *testing.T) {
 	client, bucket := ds3Bucket(t, false)
 	ctx := context.Background()
 
-	putObject(t, client, bucket, "src", "body", func(in *s3.PutObjectInput) {
-		in.Tagging = aws.String("team=alpha")
-	})
+	putObject(t, client, bucket, "src", "body", nil)
+	putTagsOn(t, client, bucket, "src", "team=alpha")
+
+	// Ask the copy to stamp a DIFFERENT tag inline. If the header were honoured
+	// the target would carry team=other; if the source's tags were copied the
+	// target would carry team=alpha.
 	if _, err := client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(bucket),
 		Key:        aws.String("dst"),
 		CopySource: aws.String(bucket + "/src"),
-		Tagging:    aws.String("team=alpha"),
+		Tagging:    aws.String("team=other"),
 	}); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
@@ -113,12 +122,37 @@ func TestDS3Claim_CopyIgnoresInlineTagging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get tags on copy: %v", err)
 	}
-	if len(tags.TagSet) > 0 {
-		t.Logf("NOTE: CopyObject DID apply x-amz-tagging (%d tags). The separate "+
-			"tag round-trip is redundant on this endpoint.", len(tags.TagSet))
-		return
+	for _, tag := range tags.TagSet {
+		if aws.ToString(tag.Key) == "team" && aws.ToString(tag.Value) == "other" {
+			t.Fatalf("CopyObject APPLIED the inline x-amz-tagging header; the writer's " +
+				"separate PutObjectTagging round-trip is redundant and the docs are wrong")
+		}
 	}
-	t.Logf("confirmed: CopyObject dropped x-amz-tagging, as documented")
+	if len(tags.TagSet) != 1 || aws.ToString(tags.TagSet[0].Value) != "alpha" {
+		t.Fatalf("copied tags = %v, want the source's team=alpha (TaggingDirective "+
+			"defaults to COPY), which is what makes the inline header ignorable", tags.TagSet)
+	}
+	t.Logf("confirmed: inline x-amz-tagging ignored; the source's own tags were copied")
+}
+
+// putTagsOn sets an object's tags the only way this endpoint honours.
+func putTagsOn(t *testing.T, client *s3.Client, bucket, key, raw string) {
+	t.Helper()
+	var set []types.Tag
+	for _, kv := range strings.Split(raw, "&") {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			t.Fatalf("bad tag %q", kv)
+		}
+		set = append(set, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	if _, err := client.PutObjectTagging(context.Background(), &s3.PutObjectTaggingInput{
+		Bucket:  aws.String(bucket),
+		Key:     aws.String(key),
+		Tagging: &types.Tagging{TagSet: set},
+	}); err != nil {
+		t.Fatalf("put tags on %q: %v", key, err)
+	}
 }
 
 // TestDS3Claim_EmptyTagSetClearsTags settles the one assumption left in the

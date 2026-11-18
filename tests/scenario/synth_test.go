@@ -126,3 +126,28 @@ func TestSynthReaderYieldsExactSizeInAnyChunking(t *testing.T) {
 		t.Fatal("checksum disagrees with the reader output")
 	}
 }
+
+// TestCountingTransportUsesHasNotGet is the regression test for a classifier
+// that silently counted nothing: the SDK sends valueless sub-resources
+// ("?tagging", "?uploads"), and url.Values.Get returns "" for those, so a
+// Get-based check misclassified every tag write as a plain PutObject.
+func TestCountingTransportUsesHasNotGet(t *testing.T) {
+	cases := []struct {
+		method, url, want string
+	}{
+		{"PUT", "https://h/b/k?tagging", kindPutTagging},
+		{"GET", "https://h/b/k?tagging", kindGetTagging},
+		{"POST", "https://h/b?uploads", kindCreateMPU},
+		{"POST", "https://h/b/k?uploadId=x", kindCompleteMPU},
+		{"PUT", "https://h/b/k", kindPutObject},
+	}
+	for _, c := range cases {
+		req, err := http.NewRequest(c.method, c.url, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		if got := classify(req); got != c.want {
+			t.Fatalf("%s %s classified as %q, want %q", c.method, c.url, got, c.want)
+		}
+	}
+}

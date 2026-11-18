@@ -958,3 +958,51 @@ func (e *scenarioEnv) syncOutcome() syncOutcome {
 		Failed: failed, Succeed: succeeded, Log: buf.String(),
 	}
 }
+
+// reconcile forces the drift sweep to run by backdating the last sweep well
+// beyond the configured interval, then syncs. Without the backdating,
+// ShouldReconcile (internal/sync/reconcile.go:17) is false and the sweep — the
+// only detector of characteristics that changed without bumping the ETag or
+// LastModified — never runs.
+func (e *scenarioEnv) reconcile() {
+	e.T.Helper()
+	if e.Pair.AttrsReconcileInterval <= 0 {
+		e.T.Fatal("reconcile() needs AttrsReconcileInterval set, or ShouldReconcile is always false")
+	}
+	past := time.Now().UTC().Add(-2 * time.Duration(e.Pair.AttrsReconcileInterval) * time.Second)
+	e.Pair.LastReconcileAt = &past
+	e.sync()
+}
+
+// markPending rewrites one cached row into the state a failed tag write leaves
+// behind: bytes known, characteristics unknown. It is the only way to reach the
+// attribute-only retry path without injecting a fault into a real client.
+func (e *scenarioEnv) markPending(key string) {
+	e.T.Helper()
+	row, ok := e.cachedKey(key)
+	if !ok {
+		e.T.Fatalf("%q is not in the cache", key)
+	}
+	row.PendingAttrs = true
+	row.AttrsHash = ""
+	if err := e.Store.Put(&row); err != nil {
+		e.T.Fatalf("mark %q pending: %v", key, err)
+	}
+}
+
+// copySelfWithMetadata changes an object's metadata without changing its bytes,
+// so neither the ETag nor LastModified moves — exactly the change only the
+// attribute fingerprint can detect.
+func copySelfWithMetadata(t *testing.T, client *s3.Client, bucket, key string, metadata map[string]string) {
+	t.Helper()
+	_, err := client.CopyObject(context.Background(), &s3.CopyObjectInput{
+		Bucket:            aws.String(bucket),
+		Key:               aws.String(key),
+		CopySource:        aws.String(copySourceValue(bucket, key)),
+		MetadataDirective: types.MetadataDirectiveReplace,
+		Metadata:          metadata,
+	})
+	if err != nil {
+		t.Fatalf("rewrite metadata of %q: %v", key, err)
+	}
+}

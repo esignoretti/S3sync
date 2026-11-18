@@ -67,15 +67,19 @@ func classify(r *http.Request) string {
 		return kindUploadPartCopy
 	case r.Method == http.MethodPut && isCopy:
 		return kindCopyObject
-	case r.Method == http.MethodPut && q.Get("tagging") != "":
+	// q.Has, not q.Get() != "": the SDK sends a valueless sub-resource
+	// ("?tagging", "?uploads"), for which Get returns "" — so a Get-based test
+	// silently classifies every tagging and multipart-create request as a plain
+	// PutObject.
+	case r.Method == http.MethodPut && q.Has("tagging"):
 		return kindPutTagging
-	case r.Method == http.MethodGet && q.Get("tagging") != "":
+	case r.Method == http.MethodGet && q.Has("tagging"):
 		return kindGetTagging
-	case r.Method == http.MethodPost && q.Get("uploads") != "":
+	case r.Method == http.MethodPost && q.Has("uploads"):
 		return kindCreateMPU
-	case r.Method == http.MethodPost && q.Get("uploadId") != "":
+	case r.Method == http.MethodPost && q.Has("uploadId"):
 		return kindCompleteMPU
-	case r.Method == http.MethodPut && q.Get("uploadId") == "" && !isCopy:
+	case r.Method == http.MethodPut && !q.Has("uploadId") && !isCopy:
 		return kindPutObject
 	default:
 		return kindOther
