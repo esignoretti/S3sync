@@ -52,6 +52,7 @@ type fakeCopyAPI struct {
 	mpuMetadata      map[string]string
 	partRanges       []string
 	partErrAt        int
+	partFailuresLeft int
 	cancelAfterPart  int
 	cancelFunc       context.CancelFunc
 	completedParts   int
@@ -95,7 +96,15 @@ func (f *fakeCopyAPI) UploadPartCopy(ctx context.Context, in *s3.UploadPartCopyI
 		f.partRanges = append(f.partRanges, *in.CopySourceRange)
 	}
 	n := len(f.partRanges)
-	if f.partErrAt != 0 && n == f.partErrAt {
+	// Failures key on the PART NUMBER, not the attempt count: a retry re-sends
+	// the same part, and keying on attempts would make the retry succeed by
+	// accident and prove nothing.
+	// partFailuresLeft: 0 = never fail, -1 = always fail, n>0 = fail n times.
+	partNo := int(aws.ToInt32(in.PartNumber))
+	if f.partErrAt != 0 && partNo == f.partErrAt && f.partFailuresLeft != 0 {
+		if f.partFailuresLeft > 0 {
+			f.partFailuresLeft--
+		}
 		return nil, errors.New("part copy failed")
 	}
 	if f.cancelAfterPart != 0 && n >= f.cancelAfterPart {

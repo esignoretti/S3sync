@@ -168,10 +168,21 @@ func (e *Engine) advanceCursor(key string) {
 // configuration is a bug this project has already shipped once, and reading per
 // run makes that staleness structurally impossible here.
 func (e *Engine) settings() config.Settings {
-	if e.settingsFn == nil {
-		return config.Settings{RunTimeoutSeconds: config.DefaultRunTimeoutSeconds}
+	st := config.Settings{RunTimeoutSeconds: config.DefaultRunTimeoutSeconds}
+	if e.settingsFn != nil {
+		st = e.settingsFn()
 	}
-	return e.settingsFn()
+	// Defend against a zero or negative timeout from any future settings source:
+	// context.WithTimeout(ctx, 0) expires immediately, so every run would fail
+	// with a deadline error that names nothing.
+	//
+	// Only non-positive values are replaced. Clamping up to MinRunTimeoutSeconds
+	// would silently ignore a smaller value a caller deliberately set, which is
+	// how the timeout tests drive a sub-second budget.
+	if st.RunTimeoutSeconds <= 0 {
+		st.RunTimeoutSeconds = config.DefaultRunTimeoutSeconds
+	}
+	return st
 }
 
 func (e *Engine) RunOnce(ctx context.Context) error {
@@ -240,6 +251,13 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	// per-object failures rather than the one real cause. setupOnce still means
 	// one attempt per engine; the recorded error is what every later run returns.
 	e.setupOnce.Do(func() {
+		// A dry run reports what would happen; it must not create a bucket or
+		// rewrite a lifecycle configuration. Provisioning is skipped rather than
+		// attempted-and-undone, because neither operation can be undone.
+		if e.pair.DryRun {
+			slog.Info("dry-run: skipping target provisioning", "pair", e.pair.Name)
+			return
+		}
 		setupCtx, setupCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer setupCancel()
 		err := ProvisionTarget(setupCtx, e.tgtS3, e.src.Region, e.tgt, e.pair,
@@ -379,11 +397,12 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	diffErr := <-diffErrCh
 	slog.Info("diff completed", "pair", e.pair.Name, "err", diffErr)
 	closeCur()
-	if diffErr != nil {
-		e.setResult("error", fmt.Sprintf("diff: %v", diffErr))
-		return fmt.Errorf("diff: %w", diffErr)
-	}
 
+	// Record what was actually copied BEFORE acting on a diff error. A listing
+	// that ran out of budget still let the workers finish every action it had
+	// already emitted, so those bytes are on the target; discarding the cache
+	// write would re-copy all of them next run and, on a bucket too large to
+	// list inside the budget, re-copy them forever without ever converging.
 	now := time.Now().UTC()
 	cached := make([]*cache.CachedObject, 0, len(succeeded))
 	for _, a := range succeeded {
@@ -397,10 +416,15 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	// A dry run must not cache what it did not copy. Cached, the next real run's
 	// differ would see matching ETags and skip those objects, so the bytes would
 	// never arrive and nothing would ever retry them.
-	if !e.pair.DryRun {
+	if !e.pair.DryRun && len(cached) > 0 {
 		if err := e.store.PutMany(cached); err != nil {
 			slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
 		}
+	}
+
+	if diffErr != nil {
+		e.setResult("error", fmt.Sprintf("diff: %v", diffErr))
+		return fmt.Errorf("diff: %w", diffErr)
 	}
 
 	totalActions := succeededCount + failed

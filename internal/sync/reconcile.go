@@ -60,9 +60,22 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 	e.mu.Unlock()
 
 	emitted := 0
+	// A single high-water cursor cannot express "retry this one key next pass":
+	// any later key that succeeds moves the mark past the failure. So a key whose
+	// read failed transiently is remembered here and re-examined next pass, while
+	// the cursor keeps the pass moving. A budget expiry is different — it is
+	// recorded in the cursor, because retrying it would spend every future budget
+	// on the same object.
+	retry := make([]string, 0, 1)
+	// undelivered is set when a drifted object's action could not be handed to
+	// the pool because the budget expired mid-send.
+	undelivered := false
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return err
+		// break, never return: every exit from this loop must fall through to the
+		// cursor bookkeeping below, or a pass that stops early silently loses both
+		// its resume point and its list of keys to retry.
+		if ctx.Err() != nil {
+			break
 		}
 		if cursor != "" && entry.Key <= cursor {
 			continue
@@ -75,13 +88,15 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 		headOut, err := e.pool.headSource(ctx, entry.Key)
 		if err != nil {
 			// One unreadable object must not abort the sweep: the rest of the
-			// bucket still needs checking. A transient error leaves the cursor
-			// where it is so the next sweep retries this key; a budget expiry
-			// must not, or every run would spend its budget on the same object
-			// and the sweep would never move.
+			// bucket still needs checking. A transient error is remembered and
+			// re-examined next pass (see the retry slice); a budget expiry
+			// advances past it instead, because retrying it would spend every
+			// future budget on the same object and the sweep would never move.
 			slog.Warn("reconcile: head source", "key", entry.Key, "error", err)
 			if ctx.Err() != nil {
 				e.advanceCursor(entry.Key)
+			} else {
+				retry = append(retry, entry.Key)
 			}
 			continue
 		}
@@ -102,6 +117,8 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 			slog.Warn("reconcile: read source tags", "key", entry.Key, "error", err)
 			if ctx.Err() != nil {
 				e.advanceCursor(entry.Key)
+			} else {
+				retry = append(retry, entry.Key)
 			}
 			continue
 		}
@@ -126,7 +143,8 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 			// future budget on this same object and the sweep would never move
 			// past it. The repair is picked up on the next full pass.
 			e.advanceCursor(entry.Key)
-			return ctx.Err()
+			undelivered = true
+			break
 		}
 		e.advanceCursor(entry.Key)
 	}
@@ -135,18 +153,45 @@ func (e *Engine) reconcileSweep(ctx context.Context, actions chan<- SyncAction) 
 	// the caller stamp LastReconcileAt as if the whole cache had been examined,
 	// deferring the next sweep by a full interval and hiding the drift this
 	// sweep never reached.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+	expired := ctx.Err() != nil
 
 	// Reaching the end of the list means the whole cache has been examined, so
-	// the next sweep starts over from the front.
+	// the next sweep starts over from the front. A budget-limited pass keeps its
+	// high-water mark.
+	//
+	// Either way, a key whose read failed transiently rewinds the mark to just
+	// before the first such key. Without that, a pass that stopped part way
+	// leaves the mark past the failure and every later pass skips it until the
+	// cache is walked to the end — many intervals later on a large cache, which
+	// is the opposite of retrying it soon.
 	e.mu.Lock()
-	e.sweepCursor = ""
+	if !expired {
+		e.sweepCursor = ""
+	}
+	if len(retry) > 0 {
+		e.sweepCursor = prevKey(retry[0])
+	}
 	e.mu.Unlock()
+
+	if expired || undelivered {
+		return ctx.Err()
+	}
 
 	if emitted > 0 {
 		slog.Info("reconcile sweep", "pair", e.pair.Name, "objects", len(entries), "drifted", emitted)
 	}
 	return nil
+}
+
+// prevKey returns a cursor value that sorts strictly before key, so a pass that
+// sets the cursor to prevKey(k) re-examines k itself. The empty string already
+// sorts before every key and is what "" means, so a key with no predecessor
+// simply restarts the pass.
+func prevKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	b := []byte(key)
+	b[len(b)-1]--
+	return string(b)
 }

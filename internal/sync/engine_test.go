@@ -147,8 +147,14 @@ type engineEndpoint struct {
 	tags           string   // <Tag> entries for a source tag read
 	lockConfigured bool
 	listBlock      chan struct{} // when non-nil, the source listing waits on it
-	headBlockKey   string        // when set, the HEAD for this key waits on headBlock
-	headBlock      chan struct{}
+	// listFailAfterFirst makes the first listing page claim a continuation and
+	// the second return 500. That is what a mid-stream listing failure looks
+	// like, which is the case StreamingDiff must report rather than treat as
+	// end-of-bucket.
+	listFailAfterFirst bool
+	listCalls          int
+	headBlockKey       string // when set, the HEAD for this key waits on headBlock
+	headBlock          chan struct{}
 }
 
 // engineListingObject is one source object whose identity matches
@@ -184,11 +190,23 @@ func (f *engineEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Held open so a test can drive the run past its deadline.
 			<-f.listBlock
 		}
+		f.mu.Lock()
+		f.listCalls++
+		call := f.listCalls
+		f.mu.Unlock()
+		if f.listFailAfterFirst && call > 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		truncated, next := "false", ""
+		if f.listFailAfterFirst {
+			truncated, next = "true", "<NextContinuationToken>page2</NextContinuationToken>"
+		}
 		w.Header().Set("Content-Type", "application/xml")
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-<Name>%s</Name><KeyCount>%d</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>%s</ListBucketResult>`,
-			testSourceBucket, len(f.objects), strings.Join(f.objects, ""))
+<Name>%s</Name><KeyCount>%d</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>%s</IsTruncated>%s%s</ListBucketResult>`,
+			testSourceBucket, len(f.objects), truncated, next, strings.Join(f.objects, ""))
 	case r.Method == http.MethodGet && r.URL.Query().Has("tagging"):
 		w.Header().Set("Content-Type", "application/xml")
 		io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><Tagging><TagSet>`+f.tags+`</TagSet></Tagging>`)
@@ -567,5 +585,65 @@ func TestRunOnce_SkipsSweepWhenNotDue(t *testing.T) {
 	}
 	if !pair.LastReconcileAt.Equal(last) {
 		t.Fatalf("LastReconcileAt moved to %v, want %v", pair.LastReconcileAt, last)
+	}
+}
+
+// A run whose diff fails AFTER objects were copied must still record them. The
+// workers finish whatever the diff already emitted, so those bytes are on the
+// target; discarding the cache write would re-copy all of them next run and, on
+// a bucket too large to list inside the budget, re-copy them forever without
+// ever converging.
+func TestRunOnceDiffFailureStillCachesCopiedObjects(t *testing.T) {
+	// The first page must be FULL: StreamingDiff treats any short page as the
+	// last one, so a one-object page would never trigger the second request and
+	// the failure under test would never happen.
+	objects := make([]string, 0, maxS3Keys)
+	for i := 0; i < maxS3Keys; i++ {
+		objects = append(objects, fmt.Sprintf(
+			`<Contents><Key>obj-%04d.txt</Key><ETag>"e%d"</ETag><Size>10</Size><LastModified>2026-01-01T00:00:00.000Z</LastModified></Contents>`,
+			i, i))
+	}
+	ep := &engineEndpoint{
+		objects: objects,
+		// First page lists maxS3Keys objects and claims more; the second page
+		// fails. So copies are emitted and complete, and then the diff errors.
+		listFailAfterFirst: true,
+	}
+	pair := &config.SyncPair{}
+	e := newTestEngine(t, pair, ep)
+
+	err := e.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("a mid-stream listing failure must fail the run")
+	}
+
+	cached, listErr := e.store.List(pair.ID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	// Every object the diff emitted was copied, so every one of them must be
+	// cached. Zero means the whole run's work was thrown away.
+	if len(cached) == 0 {
+		t.Fatal("cache is empty after a failed diff, so every object that WAS copied will be copied again next run")
+	}
+	if len(cached) != maxS3Keys {
+		t.Fatalf("cache holds %d objects after a failed diff, want %d (all of the first page)", len(cached), maxS3Keys)
+	}
+}
+
+// A dry run reports what would happen; it must not create or reconfigure the
+// target bucket, because neither operation can be undone.
+func TestRunOnceDryRunDoesNotProvision(t *testing.T) {
+	ep := &engineEndpoint{objects: []string{}}
+	pair := &config.SyncPair{DryRun: true}
+	e := newTestEngine(t, pair, ep)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	for _, req := range ep.log() {
+		if strings.HasPrefix(req, "PUT ") || strings.HasPrefix(req, "POST ") {
+			t.Fatalf("a dry run issued a write to the target: %q", req)
+		}
 	}
 }

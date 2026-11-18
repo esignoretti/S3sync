@@ -127,7 +127,9 @@ func TestCopyObjectMultipartLockRejectionIsExplained(t *testing.T) {
 }
 
 func TestCopyObjectMultipartAbortsOnPartFailure(t *testing.T) {
-	api := &fakeCopyAPI{headLen: maxCopyObjectSize + 1, partErrAt: 2}
+	// A PERMANENT failure (retryS3 gives up after 3 attempts), not a transient
+	// one: the part loop now retries, so a single failure no longer aborts.
+	api := &fakeCopyAPI{headLen: maxCopyObjectSize + 1, partErrAt: 2, partFailuresLeft: -1}
 	wp := newTestWorkerPool(api)
 
 	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "big.bin"}); err == nil {
@@ -263,5 +265,63 @@ func TestCopyObjectMultipartTagWriteHasItsOwnDeadline(t *testing.T) {
 	}
 	if action.AttrsHash == "" {
 		t.Fatal("no fingerprint recorded after a multipart copy, so the sweep would re-copy forever")
+	}
+}
+
+// Every part is a source GET, so it must be charged to the pair's get-op budget.
+// A 5 TiB object is ~10,000 of them: unthrottled, that is exactly the pressure
+// max_get_ops_per_minute exists to bound.
+//
+// The assertion is behavioural rather than a call count: with one token in the
+// bucket, the HEAD spends it and the FIRST part must then block. A copy that
+// ignores the throttler sails through and the run succeeds, which is what this
+// catches.
+func TestCopyObjectMultipartThrottlesEveryPart(t *testing.T) {
+	api := &fakeCopyAPI{
+		headLen: maxCopyObjectSize + 1,
+		headOut: &s3.HeadObjectOutput{ContentLength: aws.Int64(maxCopyObjectSize + 1)},
+	}
+	wp := newTestWorkerPool(api)
+	// 1 op/minute with a burst of 1: exactly one call goes through immediately.
+	wp.throttler = NewThrottler(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	_, err := wp.copyObject(ctx, SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`})
+	if err == nil {
+		t.Fatal("the multipart part loop copied without waiting on the throttler: every part is a source GET and must be charged to max_get_ops_per_minute")
+	}
+	if len(api.partRanges) != 0 {
+		t.Fatalf("%d parts were copied despite an exhausted budget", len(api.partRanges))
+	}
+	if api.aborted != 1 {
+		t.Fatalf("aborted = %d, want 1: a copy stopped by the throttler must not leak its upload", api.aborted)
+	}
+}
+
+// One transient error on a late part must not discard hours of work. The parts
+// loop retries like every other S3 call in the worker.
+func TestCopyObjectMultipartRetriesATransientPartFailure(t *testing.T) {
+	api := &fakeCopyAPI{
+		headLen: maxCopyObjectSize + 1,
+		headOut: &s3.HeadObjectOutput{ContentLength: aws.Int64(maxCopyObjectSize + 1)},
+		// Fail the SECOND attempt at part 2, then let it through.
+		partErrAt: 2,
+	}
+	wp := newTestWorkerPool(api)
+	// The fake errors on every attempt at part 2; make it fail only once so the
+	// retry can succeed. partRanges records one entry per attempt, so the part
+	// number is derived from the range, not the attempt count.
+	api.partFailuresLeft = 1
+
+	if _, err := wp.copyObject(context.Background(), SyncAction{Type: ActionCopy, Key: "big", ETag: `"e"`}); err != nil {
+		t.Fatalf("copyObject returned %v; a single transient part failure must be retried", err)
+	}
+	if api.aborted != 0 {
+		t.Fatalf("the upload was aborted after a retryable part failure")
+	}
+	if api.completedParts == 0 {
+		t.Fatal("the upload was never completed")
 	}
 }

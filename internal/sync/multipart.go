@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -41,11 +42,19 @@ func multipartPartSize(size int64) int64 {
 // so there is no second retention call. Tags still go through PutObjectTagging,
 // applied by the caller's attribute step.
 func (wp *WorkerPool) copyMultipart(ctx context.Context, a SyncAction, attrs ObjectAttrs, size int64) (SyncAction, error) {
-	createOut, err := wp.tgt.CreateMultipartUpload(ctx, attrs.createMPUInput(wp.targetBucket, a.Key, wp.storageClass))
+	var createOut *s3.CreateMultipartUploadOutput
+	err := retryS3(ctx, "CreateMultipartUpload", func(c context.Context) error {
+		out, err := wp.tgt.CreateMultipartUpload(c, attrs.createMPUInput(wp.targetBucket, a.Key, wp.storageClass))
+		createOut = out
+		return err
+	}, 3)
 	if err != nil {
 		return a, wp.explainCopyError(a.Key, attrs, err)
 	}
 	uploadID := aws.ToString(createOut.UploadId)
+	if uploadID == "" {
+		return a, errors.New("CreateMultipartUpload returned no upload id")
+	}
 
 	completed := false
 	defer func() {
@@ -76,20 +85,37 @@ func (wp *WorkerPool) copyMultipart(ctx context.Context, a SyncAction, attrs Obj
 			end = size - 1
 		}
 		rng := fmt.Sprintf("bytes=%d-%d", start, end)
-		out, err := wp.tgt.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
-			Bucket:          &wp.targetBucket,
-			Key:             &a.Key,
-			UploadId:        &uploadID,
-			PartNumber:      ptr(int32(partNumber)),
-			CopySource:      ptr(fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)),
-			CopySourceRange: &rng,
-		})
+		partNumber := int32(partNumber)
+		var etag *string
+		// Each part is a source GET, so it goes through the same throttle as
+		// every other source read: a 5 TiB object is ~10,000 of them, which is
+		// exactly the pressure max_get_ops_per_minute exists to bound.
+		//
+		// It also retries like every sibling call. One transient 5xx at part
+		// 4,000 would otherwise abort hours of work and restart from part 1 next
+		// cycle.
+		err := retryS3(ctx, "UploadPartCopy", func(c context.Context) error {
+			if err := wp.throttler.WaitLog(c, wp.sourceBucket); err != nil {
+				return err
+			}
+			out, err := wp.tgt.UploadPartCopy(c, &s3.UploadPartCopyInput{
+				Bucket:          &wp.targetBucket,
+				Key:             &a.Key,
+				UploadId:        &uploadID,
+				PartNumber:      &partNumber,
+				CopySource:      ptr(fmt.Sprintf("%s/%s", wp.sourceBucket, a.Key)),
+				CopySourceRange: &rng,
+			})
+			if err != nil {
+				return err
+			}
+			if out.CopyPartResult != nil {
+				etag = out.CopyPartResult.ETag
+			}
+			return nil
+		}, 3)
 		if err != nil {
 			return a, wp.explainCopyError(a.Key, attrs, err)
-		}
-		var etag *string
-		if out.CopyPartResult != nil {
-			etag = out.CopyPartResult.ETag
 		}
 		// The completion request needs QUOTED ETags, which is what the endpoint
 		// returns; passing them through unchanged is what keeps it valid.
@@ -98,12 +124,16 @@ func (wp *WorkerPool) copyMultipart(ctx context.Context, a SyncAction, attrs Obj
 		})
 	}
 
-	if _, err := wp.tgt.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:          &wp.targetBucket,
-		Key:             &a.Key,
-		UploadId:        &uploadID,
-		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: parts},
-	}); err != nil {
+	err = retryS3(ctx, "CompleteMultipartUpload", func(c context.Context) error {
+		_, err := wp.tgt.CompleteMultipartUpload(c, &s3.CompleteMultipartUploadInput{
+			Bucket:          &wp.targetBucket,
+			Key:             &a.Key,
+			UploadId:        &uploadID,
+			MultipartUpload: &s3types.CompletedMultipartUpload{Parts: parts},
+		})
+		return err
+	}, 3)
+	if err != nil {
 		return a, wp.explainCopyError(a.Key, attrs, err)
 	}
 	completed = true

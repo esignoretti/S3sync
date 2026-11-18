@@ -53,6 +53,16 @@ type fakeSweepAPI struct {
 	headHook func()
 }
 
+// sawHead reports whether the fake was asked to HEAD key.
+func (f *fakeSweepAPI) sawHead(key string) bool {
+	for _, k := range f.headRead {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeSweepAPI) HeadObject(_ context.Context, in *s3.HeadObjectInput, _ ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
 	key := aws.ToString(in.Key)
 	f.headRead = append(f.headRead, key)
@@ -461,7 +471,7 @@ func (r *sweepRig) sweepOnePass(t *testing.T, headLimit int) {
 	heads := 0
 	r.api.headHook = func() {
 		heads++
-		if heads >= headLimit {
+		if headLimit > 0 && heads >= headLimit {
 			cancel()
 		}
 	}
@@ -529,4 +539,50 @@ func TestReconcileSweepCursorResetsOnFullPass(t *testing.T) {
 	if len(rig.api.headRead) != 2 {
 		t.Fatalf("full pass read %v, want both keys", rig.api.headRead)
 	}
+}
+
+// A key whose read failed transiently must be re-examined on the NEXT pass, not
+// after a full wrap-around of the cache.
+//
+// The case that matters is a budget-limited pass: the sweep stops part way, so
+// the cursor keeps a high-water mark instead of resetting. Without remembering
+// the failure, a key that failed early is skipped by every later pass until the
+// cache is walked to the end — many intervals later on a large cache.
+func TestReconcileSweepRetriesTransientFailureNextPass(t *testing.T) {
+	rig := sweepFixture(t, []string{"a", "b", "c", "d", "e", "f"})
+
+	// Pass 1: "b" fails transiently, then the budget expires right after "c".
+	// The cancel is keyed to "c" rather than to a HEAD count, because retryS3
+	// re-invokes the fake for each attempt of the failing key.
+	rig.api.headErrs = map[string]error{"b": errors.New("connection reset")}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rig.api.headHook = func() {
+		if last := rig.api.headRead[len(rig.api.headRead)-1]; last == "c" {
+			cancel()
+		}
+	}
+	actions := make(chan SyncAction, 16)
+	if err := rig.e.reconcileSweep(ctx, actions); err == nil {
+		t.Fatal("a sweep whose budget expired must report the expiry")
+	}
+	rig.api.headHook = nil
+	close(actions)
+	if len(rig.api.copyRead) != 0 {
+		t.Fatalf("a transient read failure fabricated drift: %v", rig.api.copyRead)
+	}
+	if !rig.api.sawHead("b") {
+		t.Fatal("the fixture never attempted the failing key")
+	}
+
+	// Pass 2 must examine "b" again rather than resuming after "c".
+	delete(rig.api.headErrs, "b")
+	rig.api.headRead = nil
+	rig.sweepOnePass(t, 0)
+	for _, k := range rig.api.headRead {
+		if k == "b" {
+			return
+		}
+	}
+	t.Fatalf("the transiently failed key was not re-examined next pass; HEADs were %v", rig.api.headRead)
 }
