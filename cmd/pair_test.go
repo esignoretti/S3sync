@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/esignoretti/S3sync/internal/sync"
 )
@@ -181,4 +183,28 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 			t.Fatalf("warnings = %v", warns)
 		}
 	})
+}
+
+// A flag that is applied but never registered is invisible; a flag that is
+// registered but never applied is a silent no-op. Both halves are asserted.
+func TestApplyPairFlagsDryRun(t *testing.T) {
+	for _, c := range []*cobra.Command{pairAddCmd, pairUpdateCmd} {
+		if c.Flags().Lookup("dry-run") == nil {
+			t.Fatalf("%s: --dry-run is not registered", c.Name())
+		}
+	}
+
+	c := pairUpdateCmd
+	if err := c.Flags().Set("dry-run", "true"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Flags().Set("dry-run", "false") })
+
+	p := &config.SyncPair{}
+	if err := applyPairFlags(c, p, false); err != nil {
+		t.Fatal(err)
+	}
+	if !p.DryRun {
+		t.Fatal("dry-run flag was not applied")
+	}
 }

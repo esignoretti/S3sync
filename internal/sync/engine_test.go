@@ -421,6 +421,35 @@ func TestRunOnce_SweepsDriftBeforeTheDiff(t *testing.T) {
 	}
 }
 
+// A dry run reports what it would do and writes nothing. If it cached what it
+// "copied", the next real run's differ would see matching ETags and skip those
+// objects: the bytes would never arrive and nothing would ever retry them.
+func TestRunOnceDryRunDoesNotWriteCache(t *testing.T) {
+	ep := &engineEndpoint{objects: []string{
+		`<Contents><Key>a.txt</Key><ETag>"e1"</ETag><Size>10</Size><LastModified>2026-01-01T00:00:00.000Z</LastModified></Contents>`,
+		`<Contents><Key>b.txt</Key><ETag>"e2"</ETag><Size>10</Size><LastModified>2026-01-01T00:00:00.000Z</LastModified></Contents>`,
+	}}
+	pair := &config.SyncPair{DryRun: true}
+	e := newTestEngine(t, pair, ep)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+
+	// The run must have seen work, or "cached nothing" proves nothing. LastResult
+	// is left at zero by design on a dry run, so read the progress total.
+	if _, _, _, _, prog := e.Status(); prog.Total != 2 {
+		t.Fatalf("dry run saw %d actions, want 2; the test would be vacuous", prog.Total)
+	}
+	cached, err := e.store.List(pair.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("cache holds %d objects after a dry run, want 0: %+v", len(cached), cached)
+	}
+}
+
 // The sweep is interval-gated; running it on every cycle would put a HEAD and a
 // tag read on every cached object each time, which is the cost the interval
 // exists to avoid.

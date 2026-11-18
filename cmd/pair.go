@@ -242,6 +242,10 @@ func applyPairFlags(cmd *cobra.Command, p *config.SyncPair, create bool) error {
 			p.TargetExpireAt = &t
 		}
 	}
+	if cmd.Flags().Changed("dry-run") {
+		v, _ := cmd.Flags().GetBool("dry-run")
+		p.DryRun = v
+	}
 	// The noncurrent-version rules are regenerated wholesale by
 	// BuildLifecycleRules and applyLifecycle rewrites the lifecycle config, so
 	// they are safe to change after creation. They must be: the
@@ -325,6 +329,7 @@ func init() {
 	pairAddCmd.Flags().Bool("force-recreate", false, "Allow recreating the target bucket when --on-lock-missing recreate needs it")
 	pairAddCmd.Flags().Bool("accept-compliance", false, "Accept COMPLIANCE retention, which cannot be shortened or bypassed")
 	pairAddCmd.Flags().Int("attrs-reconcile-interval", 0, "Seconds between attribute drift sweeps (0=off)")
+	pairAddCmd.Flags().Bool("dry-run", false, "Log actions without copying or caching anything")
 
 	pairUpdateCmd.Flags().String("name", "", "New name")
 	pairUpdateCmd.Flags().String("source-bucket", "", "New source bucket ID")
@@ -342,6 +347,7 @@ func init() {
 	pairUpdateCmd.Flags().Int("newer-noncurrent-versions", 0, "Keep this many noncurrent versions regardless of age")
 	pairUpdateCmd.Flags().Bool("confirm-expire-earlier", false, "Confirm moving the target expiry date earlier")
 	pairUpdateCmd.Flags().Bool("accept-compliance", false, "Accept COMPLIANCE retention, which cannot be shortened or bypassed")
+	pairUpdateCmd.Flags().Bool("dry-run", false, "Log actions without copying or caching anything")
 	pairUpdateCmd.Flags().Bool("require-object-lock", false, "Not settable after creation (rejected)")
 	pairUpdateCmd.Flags().String("on-lock-missing", "fail", "Not settable after creation (rejected)")
 

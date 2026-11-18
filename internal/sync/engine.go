@@ -342,8 +342,13 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 			AttrsHash: a.AttrsHash, PendingAttrs: a.PendingAttrs,
 		})
 	}
-	if err := e.store.PutMany(cached); err != nil {
-		slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
+	// A dry run must not cache what it did not copy. Cached, the next real run's
+	// differ would see matching ETags and skip those objects, so the bytes would
+	// never arrive and nothing would ever retry them.
+	if !e.pair.DryRun {
+		if err := e.store.PutMany(cached); err != nil {
+			slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
+		}
 	}
 
 	totalActions := succeededCount + failed
