@@ -42,7 +42,7 @@ func TestNewEngine_PoolHeadsSourceWithSourceClient(t *testing.T) {
 	src := &config.Bucket{BucketName: testSourceBucket}
 	tgt := &config.Bucket{BucketName: testTargetBucket}
 
-	e := NewEngine(pair, src, tgt, srcS3, tgtS3, nil)
+	e := NewEngine(pair, src, tgt, srcS3, tgtS3, nil, nil)
 
 	if e.pool.src != srcS3 {
 		t.Fatalf("pool.src is not the source client: a source HEAD would be signed with the target's credentials")
@@ -109,7 +109,7 @@ func TestRunOnce_VanishedObjectIsNotCached(t *testing.T) {
 	src := &config.Bucket{BucketName: testSourceBucket}
 	tgt := &config.Bucket{BucketName: testTargetBucket}
 
-	e := NewEngine(pair, src, tgt, srcS3, tgtS3, store)
+	e := NewEngine(pair, src, tgt, srcS3, tgtS3, store, nil)
 	if err := e.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -146,6 +146,7 @@ type engineEndpoint struct {
 	objects        []string // <Contents> entries for the source listing
 	tags           string   // <Tag> entries for a source tag read
 	lockConfigured bool
+	listBlock      chan struct{} // when non-nil, the source listing waits on it
 }
 
 // engineListingObject is one source object whose identity matches
@@ -177,6 +178,10 @@ func (f *engineEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
 		io.WriteString(w, `<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>`)
 	case r.Method == http.MethodGet && r.URL.Path == "/"+testSourceBucket:
+		if f.listBlock != nil {
+			// Held open so a test can drive the run past its deadline.
+			<-f.listBlock
+		}
 		w.Header().Set("Content-Type", "application/xml")
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -210,6 +215,14 @@ func (f *engineEndpoint) log() []string {
 // the run exercises the same paths production does.
 func newTestEngine(t *testing.T, pair *config.SyncPair, ep *engineEndpoint) *Engine {
 	t.Helper()
+	return newTestEngineWithSettings(t, pair, ep, nil)
+}
+
+// newTestEngineWithSettings is newTestEngine with an explicit settings source,
+// for the tests that care where the run timeout comes from.
+func newTestEngineWithSettings(t *testing.T, pair *config.SyncPair, ep *engineEndpoint,
+	settingsFn func() config.Settings) *Engine {
+	t.Helper()
 	srv := httptest.NewServer(ep)
 	t.Cleanup(srv.Close)
 
@@ -241,7 +254,30 @@ func newTestEngine(t *testing.T, pair *config.SyncPair, ep *engineEndpoint) *Eng
 		pair.WorkerCount = 1
 	}
 	return NewEngine(pair, &config.Bucket{BucketName: testSourceBucket},
-		&config.Bucket{BucketName: testTargetBucket}, srcS3, tgtS3, store)
+		&config.Bucket{BucketName: testTargetBucket}, srcS3, tgtS3, store, settingsFn)
+}
+
+// The run timeout is a setting, not a constant: five minutes was too short for
+// any real bucket and the failure it produced (a diff deadline) named nothing an
+// operator could act on.
+func TestRunOnceUsesConfiguredTimeout(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	ep := &engineEndpoint{listBlock: release}
+	e := newTestEngineWithSettings(t, &config.SyncPair{}, ep,
+		func() config.Settings { return config.Settings{RunTimeoutSeconds: 1} })
+
+	start := time.Now()
+	err := e.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("want a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "diff") {
+		t.Fatalf("err = %v, want a diff/deadline error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("run took %s; the configured 1s timeout was not applied", elapsed)
+	}
 }
 
 // A lifecycle Expiration.Date already in the past has the target deleting

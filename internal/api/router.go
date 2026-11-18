@@ -121,7 +121,7 @@ func (s *Server) createEngine(pairID string) (*sync.Engine, error) {
 		return nil, fmt.Errorf("create s3 client for target: %w", err)
 	}
 
-	engine := sync.NewEngine(pair, src, tgt, srcS3, tgtS3, s.cache)
+	engine := sync.NewEngine(pair, src, tgt, srcS3, tgtS3, s.cache, s.repo.GetSettingsOrDefaults)
 	s.SetEngine(pairID, engine)
 	return engine, nil
 }

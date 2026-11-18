@@ -100,6 +100,7 @@ type Engine struct {
 	store     *cache.Store
 	throttler *Throttler
 	pool      *WorkerPool
+	settingsFn func() config.Settings
 
 	mu            sync.Mutex
 	running       bool
@@ -117,7 +118,8 @@ type Engine struct {
 }
 
 func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
-	srcS3, tgtS3 *s3.Client, cacheStore *cache.Store) *Engine {
+	srcS3, tgtS3 *s3.Client, cacheStore *cache.Store,
+	settingsFn func() config.Settings) *Engine {
 
 	thr := NewThrottler(pair.MaxGetOpsPerMinute)
 	progress := &Progress{}
@@ -133,7 +135,19 @@ func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
 		throttler: thr,
 		pool:      pool,
 		progress:  progress,
+		settingsFn: settingsFn,
 	}
+}
+
+// settings returns the current global settings. It is called at the start of
+// every run rather than at construction: an engine holding a stale copy of its
+// configuration is a bug this project has already shipped once, and reading per
+// run makes that staleness structurally impossible here.
+func (e *Engine) settings() config.Settings {
+	if e.settingsFn == nil {
+		return config.Settings{RunTimeoutSeconds: config.DefaultRunTimeoutSeconds}
+	}
+	return e.settingsFn()
 }
 
 func (e *Engine) RunOnce(ctx context.Context) error {
@@ -173,8 +187,12 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		return ErrPairExpired
 	}
 
-	timeout := 5 * time.Minute
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	// The timeout is a setting read here, at the start of every run, rather than
+	// captured at construction: five minutes was too short for any real bucket,
+	// and an engine holding a stale copy of its configuration is a bug this
+	// project has already shipped once.
+	runTimeout := time.Duration(e.settings().RunTimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	e.mu.Lock()
 	if e.cancel != nil {
 		e.cancel()

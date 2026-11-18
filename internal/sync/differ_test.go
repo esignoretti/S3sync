@@ -2,6 +2,8 @@ package sync
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -178,5 +180,77 @@ func TestDifferPrefersCopyOverCopyAttributesWhenBytesChanged(t *testing.T) {
 	result := collectActions(t, actions)
 	if len(result) != 1 || result[0].Type != ActionCopy {
 		t.Fatalf("expected exactly one ActionCopy, got %+v", result)
+	}
+}
+
+// A listing that fails part-way through is not the end of the bucket. If the
+// error is swallowed as end-of-list, the merge join believes every remaining
+// cached object is absent from the source and — with delete propagation on —
+// emits ActionDelete for objects that are still there. The run then deletes
+// live target data because a page fetch timed out.
+func TestStreamingDiffMidStreamListErrorIsReturned(t *testing.T) {
+	// A full page: the differ treats any page with fewer than maxS3Keys entries
+	// as the last one, so a short page would never fetch page 2 and the error
+	// would never be reached.
+	page1 := make([]s3types.Object, 0, maxS3Keys)
+	for i := 0; i < maxS3Keys; i++ {
+		page1 = append(page1, s3types.Object{
+			Key: aws.String(fmt.Sprintf("a%04d.txt", i)), ETag: aws.String(`"1"`),
+			Size: aws.Int64(1), LastModified: aws.Time(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
+		})
+	}
+	calls := 0
+	listPage := func(ctx context.Context, tok *string) (*s3.ListObjectsV2Output, error) {
+		calls++
+		if calls == 1 {
+			return &s3.ListObjectsV2Output{
+				Contents:              page1,
+				IsTruncated:           aws.Bool(true),
+				NextContinuationToken: aws.String("t1"),
+			}, nil
+		}
+		return nil, errors.New("connection reset")
+	}
+
+	store, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// The cached object sorts after the page-1 key, so the merge join reaches it
+	// only after the failing fetch.
+	if err := store.PutMany([]*cache.CachedObject{{
+		PairID: "p1", Key: "z.txt", ETag: `"9"`, Size: 1,
+		LastModified: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	cur, closeCur, err := store.NewCursor("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeCur()
+
+	actions := make(chan SyncAction, 10)
+	var diffErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		diffErr = StreamingDiff(context.Background(), listPage, cur, true, actions)
+	}()
+
+	var deletes []string
+	for a := range actions {
+		if a.Type == ActionDelete {
+			deletes = append(deletes, a.Key)
+		}
+	}
+	<-done
+
+	if diffErr == nil {
+		t.Fatalf("StreamingDiff returned nil after a mid-stream list error; it emitted deletes %v", deletes)
+	}
+	if len(deletes) != 0 {
+		t.Fatalf("emitted %d ActionDelete (%v) for objects that may still exist", len(deletes), deletes)
 	}
 }

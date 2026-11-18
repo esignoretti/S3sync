@@ -44,7 +44,7 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	}
 	defer cacheStore.Close()
 
-	engine := NewEngine(pair, src, tgt, srcS3, tgtS3, cacheStore)
+	engine := NewEngine(pair, src, tgt, srcS3, tgtS3, cacheStore, repo.GetSettingsOrDefaults)
 	start := time.Now()
 
 	// Progress display goroutine

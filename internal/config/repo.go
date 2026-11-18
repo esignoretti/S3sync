@@ -456,3 +456,16 @@ func decryptCreds(key []byte, b *Bucket) {
 		}
 	}
 }
+
+// GetSettingsOrDefaults adapts GetSettings to the engine's settings function,
+// degrading to defaults rather than failing a run. A sync that cannot read its
+// own settings should still run with the shipped defaults; refusing would turn
+// a corrupt row into an outage.
+func (r *Repository) GetSettingsOrDefaults() Settings {
+	s, err := r.GetSettings()
+	if err != nil {
+		slog.Warn("settings: read failed, using defaults", "error", err)
+		return Settings{RunTimeoutSeconds: DefaultRunTimeoutSeconds}
+	}
+	return s
+}

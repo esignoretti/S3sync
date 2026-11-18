@@ -110,24 +110,43 @@ func StreamingDiff(
 	var pageIdx int
 	var pageLast bool
 	var listDone bool
+	// A failed page fetch is NOT the end of the bucket. Recording it here and
+	// stopping the merge join is what keeps the differ from concluding that
+	// every remaining cached object is absent from the source: with delete
+	// propagation on, that conclusion deletes live target data because one
+	// listing call timed out.
+	var listErr error
 
 	nextListObj := func() (*s3types.Object, bool) {
-		if listDone {
+		if listDone || listErr != nil {
 			return nil, false
 		}
 		for pageIdx >= len(currentPage) {
 			select {
 			case p, ok := <-pages:
 				if !ok {
+					// The fetcher closes `pages` on its way out, error or not,
+					// so a closed channel alone does not mean the listing
+					// finished. Check for a recorded error before concluding
+					// the bucket ended.
+					select {
+					case err := <-errCh:
+						listErr = err
+					default:
+					}
 					listDone = true
 					return nil, false
 				}
 				currentPage = p.objs
 				pageIdx = 0
 				pageLast = p.last
-			case <-errCh:
+			case err := <-errCh:
+				listErr = err
+				listDone = true
 				return nil, false
 			case <-ctx.Done():
+				listErr = ctx.Err()
+				listDone = true
 				return nil, false
 			}
 		}
@@ -145,6 +164,9 @@ func StreamingDiff(
 	for listHasMore || cacheHasMore {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if listErr != nil {
+			return listErr
 		}
 
 		if listHasMore && (!cacheHasMore || keyLt(aws.ToString(listObj.Key), cacheCur.Key())) {
@@ -186,7 +208,7 @@ func StreamingDiff(
 		}
 	}
 
-	return nil
+	return listErr
 }
 
 func keyLt(a, b string) bool {
