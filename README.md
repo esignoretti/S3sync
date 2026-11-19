@@ -393,17 +393,20 @@ export S3_TEST_ACCESS_KEY=... S3_TEST_SECRET_KEY=...
 
 Three tiers, selected with `SCENARIO_TIER`:
 
-| Tier | Adds | Measured |
+| Tier | Adds | Time |
 | --- | --- | --- |
-| `fast` | Every behaviour that needs no large object and no bulk seeding | ~15 minutes |
-| `full` | 1,200-object listing scenario, 5 GiB compositions either side of the single-copy limit | ~55 minutes |
-| `all` | 6 GiB multipart objects, 500 locked objects | ~2 hours |
+| `fast` | Every behaviour that needs no large object and no bulk seeding | ~20 min (measured) |
+| `full` | 1,200-object listing scenario, 5 GiB object either side of the single-copy limit | ~25 min (measured) |
+| `all` | 6 GiB multipart objects, 500 locked objects | ~2 h (estimate) |
 
-The times are what this suite actually costs against a distributed endpoint,
-not an estimate: every S3 request is a network round-trip, ~750 ms to `HEAD` an
-object and ~1.3 s to copy one, and there are ~60 scenarios each of which builds
-its own buckets, seeds, syncs three times and tears down. Running the whole suite
-is a deliberate act, not something to do on every save.
+The two measured tiers cost about the same because they drop and add comparable
+work: `full` loses the 500 s bulk-listing scenarios to `fast` and gains a 5 GiB
+composition. The times are real, not estimates — every S3 request here is a
+round-trip to a distributed endpoint (~750 ms to `HEAD` an object, ~1.3 s to copy
+one) and there are ~65 scenarios, each building its own buckets, seeding, syncing
+three times and tearing down. Per-scenario durations vary by a factor of two
+between runs, so treat these as the order of magnitude. Running the suite is a
+deliberate act, not something to do on every save.
 
 `SCENARIO_CLI_BIN` additionally enables the one end-to-end test that drives the
 shipped binary rather than the library, so a flag wired into the engine but never
