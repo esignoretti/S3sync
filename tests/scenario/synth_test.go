@@ -151,3 +151,28 @@ func TestCountingTransportUsesHasNotGet(t *testing.T) {
 		}
 	}
 }
+
+// TestCountingTransportIgnoresBucketOperations is the regression test for a
+// counter that made an idempotent sync look like a copy: provisioning re-issues
+// PUT ?lifecycle and PUT ?versioning on every engine start, and a bucket-level
+// PUT has no key in its path.
+func TestCountingTransportIgnoresBucketOperations(t *testing.T) {
+	for _, url := range []string{
+		"https://h/bucket?lifecycle=",
+		"https://h/bucket?versioning=",
+		"https://h/bucket?object-lock=",
+	} {
+		req, err := http.NewRequest(http.MethodPut, url, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		if got := classify(req); got == kindPutObject {
+			t.Fatalf("%s was counted as an object write", url)
+		}
+	}
+	// An object PUT must still be counted.
+	req, _ := http.NewRequest(http.MethodPut, "https://h/bucket/obj/key.bin", nil)
+	if got := classify(req); got != kindPutObject {
+		t.Fatalf("object PUT classified as %q, want %q", got, kindPutObject)
+	}
+}

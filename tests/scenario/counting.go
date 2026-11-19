@@ -55,23 +55,29 @@ func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-// classify maps a request to a kind. Order matters: an UploadPartCopy is a PUT
-// carrying X-Amz-Copy-Source AND a partNumber, while a plain CopyObject carries
-// the header without a partNumber.
+// classify maps a request to a kind.
+//
+// Three distinctions the counting assertions depend on:
+//   - a bucket-level request has no key in its path (PUT /bucket?lifecycle) and
+//     is never an object write, because provisioning re-issues it on every
+//     engine start and counting it made an idempotent sync look like a copy;
+//   - the SDK sends VALUELESS sub-resources ("?tagging", "?uploads"), for which
+//     url.Values.Get returns "", so presence must be tested with Has — a Get
+//     test silently classified every tag write as a plain PutObject;
+//   - an UploadPartCopy is a PUT with X-Amz-Copy-Source AND a partNumber, while
+//     CopyObject carries the header without a partNumber.
 func classify(r *http.Request) string {
 	q := r.URL.Query()
 	isCopy := r.Header.Get("X-Amz-Copy-Source") != ""
+	hasKey := strings.Count(strings.Trim(r.URL.Path, "/"), "/") >= 1
+	isPut := r.Method == http.MethodPut
 
 	switch {
-	case r.Method == http.MethodPut && isCopy && q.Get("partNumber") != "":
+	case isPut && isCopy && q.Has("partNumber"):
 		return kindUploadPartCopy
-	case r.Method == http.MethodPut && isCopy:
+	case isPut && isCopy:
 		return kindCopyObject
-	// q.Has, not q.Get() != "": the SDK sends a valueless sub-resource
-	// ("?tagging", "?uploads"), for which Get returns "" — so a Get-based test
-	// silently classifies every tagging and multipart-create request as a plain
-	// PutObject.
-	case r.Method == http.MethodPut && q.Has("tagging"):
+	case isPut && q.Has("tagging"):
 		return kindPutTagging
 	case r.Method == http.MethodGet && q.Has("tagging"):
 		return kindGetTagging
@@ -79,7 +85,7 @@ func classify(r *http.Request) string {
 		return kindCreateMPU
 	case r.Method == http.MethodPost && q.Has("uploadId"):
 		return kindCompleteMPU
-	case r.Method == http.MethodPut && !q.Has("uploadId") && !isCopy:
+	case isPut && hasKey && !q.Has("uploadId"):
 		return kindPutObject
 	default:
 		return kindOther
