@@ -22,6 +22,21 @@ func TestSynthBytesAreDeterministicAndRangeConsistent(t *testing.T) {
 	if !bytes.Equal(synthBytesAt("obj/0001-small.bin", 1000, 64), full[1000:1064]) {
 		t.Fatal("a range read disagrees with the same window of a full read")
 	}
+
+	// Sweep offsets and lengths rather than trusting one sample. synthBytesAt
+	// assembles a window from the tail of one 8-byte word, then whole words,
+	// then a partial word — three code paths, and an offset that is not a
+	// multiple of 8 exercises the first. A single 1000/64 sample happens to be
+	// word-aligned and would not catch a broken head-word path, which would
+	// silently corrupt every range assertion in the large-object scenarios.
+	for off := int64(0); off < 64; off++ {
+		for n := int64(1); n <= 40; n++ {
+			got := synthBytesAt("obj/0001-small.bin", off, n)
+			if !bytes.Equal(got, full[off:off+n]) {
+				t.Fatalf("synthBytesAt(off=%d, n=%d) disagrees with the full read", off, n)
+			}
+		}
+	}
 }
 
 func TestSynthBytesDifferPerKey(t *testing.T) {
