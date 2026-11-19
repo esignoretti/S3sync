@@ -103,7 +103,15 @@ func TestScenarioLargeSecondSyncIsNoop(t *testing.T) {
 	// never runs, and this test degrades to a plain differ-level idempotence
 	// check that says nothing about the writer/sweep fingerprint round-trip its
 	// name promises.
-	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 60})
+	//
+	// It must also be LONGER than a sync takes. Composing and copying 6 GiB takes
+	// ~90s, so a 60s interval made the sweep due on every cycle: the second sync
+	// then read one tag per cached object, which is the sweep's documented cost,
+	// and the "no work" assertion failed on it. That was a test defect, not a
+	// product one — the sweep is supposed to re-read characteristics. Forcing the
+	// sweep explicitly via reconcile() is both deterministic and the thing this
+	// test actually means to exercise.
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 3600})
 	e.composeLarge("big/attrs.bin", 6<<30, nil)
 	e.sync()
 	e.assertNoWorkOnSecondSync()

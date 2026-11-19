@@ -11,6 +11,14 @@ import (
 	"github.com/esignoretti/S3sync/internal/sync"
 )
 
+// validPairWith fills the structural settings a real pair always has, so a test
+// asserting a semantic rule is not accidentally exercising the worker/interval
+// bounds. ApplyDefaults is exactly what the JSON paths do for an omitted field.
+func validPairWith(p config.SyncPair) *config.SyncPair {
+	p.ApplyDefaults()
+	return &p
+}
+
 func TestValidatePairOptions(t *testing.T) {
 	past := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	earlier := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -18,14 +26,14 @@ func TestValidatePairOptions(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
 	t.Run("compliance needs explicit acceptance", func(t *testing.T) {
-		_, err := sync.ValidatePairOptions(&config.SyncPair{}, "COMPLIANCE", 0, false, false, nil, false, now)
+		_, err := sync.ValidatePairOptions(&config.SyncPair{SyncInterval: 300, WorkerCount: 10}, "COMPLIANCE", 0, false, false, nil, false, now)
 		if !errors.Is(err, sync.ErrComplianceNeedsConfirm) {
 			t.Fatalf("err = %v, want ErrComplianceNeedsConfirm", err)
 		}
 	})
 
 	t.Run("compliance accepted", func(t *testing.T) {
-		if _, err := sync.ValidatePairOptions(&config.SyncPair{}, "COMPLIANCE", 0, true, false, nil, false, now); err != nil {
+		if _, err := sync.ValidatePairOptions(&config.SyncPair{SyncInterval: 300, WorkerCount: 10}, "COMPLIANCE", 0, true, false, nil, false, now); err != nil {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -34,14 +42,14 @@ func TestValidatePairOptions(t *testing.T) {
 	// reaches validation verbatim. Comparing case-sensitively would let it
 	// through the gate while still being sent to the endpoint unchanged.
 	t.Run("compliance is matched case-insensitively", func(t *testing.T) {
-		_, err := sync.ValidatePairOptions(&config.SyncPair{}, "compliance", 0, false, false, nil, false, now)
+		_, err := sync.ValidatePairOptions(&config.SyncPair{SyncInterval: 300, WorkerCount: 10}, "compliance", 0, false, false, nil, false, now)
 		if !errors.Is(err, sync.ErrComplianceNeedsConfirm) {
 			t.Fatalf("err = %v, want ErrComplianceNeedsConfirm", err)
 		}
 	})
 
 	t.Run("past expiry rejected", func(t *testing.T) {
-		p := &config.SyncPair{TargetExpireAt: &past}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, TargetExpireAt: &past}
 		_, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, false, now)
 		if !errors.Is(err, sync.ErrExpireInPast) {
 			t.Fatalf("err = %v, want ErrExpireInPast", err)
@@ -50,7 +58,7 @@ func TestValidatePairOptions(t *testing.T) {
 
 	t.Run("non-midnight expiry rejected", func(t *testing.T) {
 		noon := time.Date(2027, 6, 1, 12, 0, 0, 0, time.UTC)
-		p := &config.SyncPair{TargetExpireAt: &noon}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, TargetExpireAt: &noon}
 		_, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, false, now)
 		if !errors.Is(err, sync.ErrExpireNotMidnight) {
 			t.Fatalf("err = %v, want ErrExpireNotMidnight", err)
@@ -58,7 +66,7 @@ func TestValidatePairOptions(t *testing.T) {
 	})
 
 	t.Run("moving expiry earlier needs confirmation", func(t *testing.T) {
-		p := &config.SyncPair{TargetExpireAt: &earlier}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, TargetExpireAt: &earlier}
 		_, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &later, false, now)
 		if !errors.Is(err, sync.ErrExpireEarlierNeedsConfirm) {
 			t.Fatalf("err = %v, want ErrExpireEarlierNeedsConfirm", err)
@@ -69,14 +77,14 @@ func TestValidatePairOptions(t *testing.T) {
 	})
 
 	t.Run("moving expiry later needs no confirmation", func(t *testing.T) {
-		p := &config.SyncPair{TargetExpireAt: &later}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, TargetExpireAt: &later}
 		if _, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &earlier, false, now); err != nil {
 			t.Fatalf("err = %v", err)
 		}
 	})
 
 	t.Run("noncurrent days without newer versions is allowed", func(t *testing.T) {
-		p := &config.SyncPair{NoncurrentExpireDays: 5}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, NoncurrentExpireDays: 5}
 		if _, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, true, nil, false, now); err != nil {
 			t.Fatalf("err = %v", err)
 		}
@@ -92,12 +100,66 @@ func hasCode(warns []sync.AdvisoryWarning, code string) bool {
 	return false
 }
 
+// A zero worker count means no goroutine drains the actions channel: the run
+// copies nothing and still reports status "ok". Measured on the live endpoint
+// before this check existed — a pair created with --workers 0 synced an object
+// into nothing, reported "ok", and kept doing so forever. A non-positive
+// interval is the serve-side equivalent: interval=0 was measured running 79
+// sync cycles in 8 seconds, each listing both buckets.
+func TestValidatePairOptionsRejectsStructuralValues(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+
+	// Built directly, NOT via validPairWith: that helper calls ApplyDefaults,
+	// which rewrites 0 to the default and would mask the very values under test.
+	// That masking is the reason the CLI path must never call ApplyDefaults.
+	for _, workers := range []int{0, -1, -100, sync.MaxWorkerCount + 1} {
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: workers}
+		_, err := sync.ValidatePairOptions(p, "", 0, false, true, nil, false, now)
+		if !errors.Is(err, sync.ErrInvalidWorkerCount) {
+			t.Errorf("workers=%d: err = %v, want ErrInvalidWorkerCount", workers, err)
+		}
+	}
+
+	for _, interval := range []int{0, -1, -300} {
+		p := &config.SyncPair{SyncInterval: interval, WorkerCount: 10}
+		_, err := sync.ValidatePairOptions(p, "", 0, false, true, nil, false, now)
+		if !errors.Is(err, sync.ErrInvalidSyncInterval) {
+			t.Errorf("interval=%d: err = %v, want ErrInvalidSyncInterval", interval, err)
+		}
+	}
+
+	// The boundary must stay valid, or every ordinary pair is rejected.
+	p := validPairWith(config.SyncPair{SyncInterval: 1, WorkerCount: 1})
+	if _, err := sync.ValidatePairOptions(p, "", 0, false, true, nil, false, now); err != nil {
+		t.Errorf("workers=1, interval=1 rejected: %v", err)
+	}
+	p = validPairWith(config.SyncPair{SyncInterval: 300, WorkerCount: sync.MaxWorkerCount})
+	if _, err := sync.ValidatePairOptions(p, "", 0, false, true, nil, false, now); err != nil {
+		t.Errorf("workers=MaxWorkerCount rejected: %v", err)
+	}
+}
+
+// The CLI flags carry defaults, so an explicit --workers 0 is visible as 0 and
+// must be rejected rather than silently replaced. ApplyDefaults exists for the
+// JSON paths, where an omitted field is indistinguishable from a zero one; if it
+// ran on the CLI path too, this whole class of typo would be masked.
+func TestApplyDefaultsDoesNotMaskCLIValues(t *testing.T) {
+	p := &config.SyncPair{WorkerCount: 0, SyncInterval: 0}
+	if p.WorkerCount != 0 || p.SyncInterval != 0 {
+		t.Fatal("ApplyDefaults ran without being called")
+	}
+	p.ApplyDefaults()
+	if p.WorkerCount != config.DefaultWorkerCount || p.SyncInterval != config.DefaultSyncIntervalSeconds {
+		t.Fatalf("ApplyDefaults left %d/%d", p.WorkerCount, p.SyncInterval)
+	}
+}
+
 func TestValidatePairOptionsWarnings(t *testing.T) {
 	expire := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
 	t.Run("noncurrent recommended when lock is required without noncurrent expiry", func(t *testing.T) {
-		p := &config.SyncPair{RequireObjectLock: true, TargetExpireAt: &expire}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, RequireObjectLock: true, TargetExpireAt: &expire}
 		warns, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, false, now)
 		if err != nil {
 			t.Fatalf("err = %v", err)
@@ -108,7 +170,7 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 	})
 
 	t.Run("no noncurrent warning when noncurrent expiry is set", func(t *testing.T) {
-		p := &config.SyncPair{RequireObjectLock: true, TargetExpireAt: &expire, NoncurrentExpireDays: 30}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, RequireObjectLock: true, TargetExpireAt: &expire, NoncurrentExpireDays: 30}
 		warns, _ := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, false, now)
 		if hasCode(warns, "noncurrent-recommended") {
 			t.Fatalf("warnings = %v", warns)
@@ -116,7 +178,7 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 	})
 
 	t.Run("retention past expiry warns", func(t *testing.T) {
-		p := &config.SyncPair{TargetExpireAt: &expire}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, TargetExpireAt: &expire}
 		// 200 days of retention from 2026-11-15 lands in 2027-06, past the expiry.
 		warns, err := sync.ValidatePairOptions(p, "COMPLIANCE", 200, true, false, nil, false, now)
 		if err != nil {
@@ -128,7 +190,7 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 	})
 
 	t.Run("retention inside the expiry does not warn", func(t *testing.T) {
-		p := &config.SyncPair{TargetExpireAt: &expire}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, TargetExpireAt: &expire}
 		warns, err := sync.ValidatePairOptions(p, "GOVERNANCE", 30, true, false, nil, false, now)
 		if err != nil {
 			t.Fatalf("err = %v", err)
@@ -139,7 +201,7 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 	})
 
 	t.Run("clearing an expiry warns that the lifecycle rule survives", func(t *testing.T) {
-		p := &config.SyncPair{}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10}
 		warns, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, false, &expire, false, now)
 		if err != nil {
 			t.Fatalf("err = %v", err)
@@ -150,7 +212,7 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 	})
 
 	t.Run("enabling replication warns that earlier objects are not backfilled", func(t *testing.T) {
-		p := &config.SyncPair{ReplicateAttributes: true}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, ReplicateAttributes: true}
 		warns, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, true, now)
 		if err != nil {
 			t.Fatalf("err = %v", err)
@@ -161,7 +223,7 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 	})
 
 	t.Run("noncurrent without expiry warns that the expire rule is dropped", func(t *testing.T) {
-		p := &config.SyncPair{NoncurrentExpireDays: 30}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, NoncurrentExpireDays: 30}
 		warns, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, false, now)
 		if err != nil {
 			t.Fatalf("err = %v", err)
@@ -174,7 +236,7 @@ func TestValidatePairOptionsWarnings(t *testing.T) {
 	t.Run("replication already on does not warn about backfill", func(t *testing.T) {
 		// Saving an unrelated edit on a pair that already replicates must not
 		// re-nag about a backfill the operator was told about once already.
-		p := &config.SyncPair{ReplicateAttributes: true}
+		p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10, ReplicateAttributes: true}
 		warns, err := sync.ValidatePairOptions(p, "GOVERNANCE", 0, true, false, nil, false, now)
 		if err != nil {
 			t.Fatalf("err = %v", err)
@@ -200,7 +262,7 @@ func TestApplyPairFlagsDryRun(t *testing.T) {
 	}
 	t.Cleanup(func() { c.Flags().Set("dry-run", "false") })
 
-	p := &config.SyncPair{}
+	p := &config.SyncPair{SyncInterval: 300, WorkerCount: 10}
 	if err := applyPairFlags(c, p, false); err != nil {
 		t.Fatal(err)
 	}

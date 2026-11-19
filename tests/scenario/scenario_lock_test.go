@@ -111,14 +111,23 @@ func TestScenarioLockWithoutTargetLock(t *testing.T) {
 		in.ObjectLockMode = types.ObjectLockModeGovernance
 		in.ObjectLockRetainUntilDate = aws.Time(time.Now().Add(time.Hour))
 	})
-	// A refused object is a per-object failure, not a run error: the run itself
-	// succeeds and reports status "error" with one failed worker.
+	// A refused object is a per-object failure, and since the CLI-truthfulness fix
+	// it is also reported to the caller as an error — a cron job cannot act on a
+	// status it never sees. What must stay true is the distinction the old
+	// assertion was reaching for: the RUN completed (it listed, it tried, it
+	// counted) rather than aborting early with a run-level error like a failed
+	// provision or an expired pair. So the error must be ErrObjectsFailed, not
+	// some other failure.
 	out := e.syncOutcome()
-	if out.Err != nil {
-		t.Fatalf("run error = %v, want a per-object failure", out.Err)
+	if !errors.Is(out.Err, sync.ErrObjectsFailed) {
+		t.Fatalf("run error = %v, want ErrObjectsFailed: the run finished but an object "+
+			"failed, which is not the same as a run-level abort", out.Err)
 	}
 	if out.Failed != 1 {
 		t.Fatalf("failed = %d, want 1", out.Failed)
+	}
+	if !strings.Contains(out.Status, "error") {
+		t.Fatalf("status = %q, want it to report error", out.Status)
 	}
 	if !strings.Contains(out.Log, "object lock") {
 		t.Fatalf("the failure does not name object lock, so the operator is sent after the wrong cause: %q", out.Log)

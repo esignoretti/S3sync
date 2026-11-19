@@ -60,7 +60,7 @@ document.addEventListener('alpine:init', () => {
                 this.step = d.step_num;
                 if (d.step_num === 2) this.f = defaultForm();
                 if (d.done) { this.step = 4; }
-            } catch(e) {
+            } catch {
                 this.error = 'Network error';
             }
             this.loading = false;
@@ -244,20 +244,20 @@ async function pollStatus() {
 
             addActionBtn('Sync Now', 'btn-primary', 'sync', p.id).addEventListener('click', async function() {
                 this.disabled = true; this.textContent = 'Syncing...';
-                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/sync', { method: 'POST' }); } catch(e) {}
+                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/sync', { method: 'POST' }); } catch {}
                 setTimeout(pollStatus, 200);
             });
 
             addActionBtn(p.enabled ? 'Pause' : 'Resume', p.enabled ? 'btn-secondary' : 'btn-primary', 'toggle', p.id).addEventListener('click', async function() {
                 this.disabled = true; this.textContent = '...';
-                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/disable', { method: 'POST' }); } catch(e) {}
+                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/disable', { method: 'POST' }); } catch {}
                 pollStatus();
             });
 
             addActionBtn('Reset', 'btn-secondary', 'reset', p.id).addEventListener('click', async function() {
                 if (!confirm('Reset sync pair? This clears cache and status, then restarts from scratch.')) return;
                 this.disabled = true; this.textContent = 'Resetting...';
-                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/reset', { method: 'POST' }); } catch(e) {}
+                try { await fetch('/api/sync-pairs/' + this.dataset.id + '/reset', { method: 'POST' }); } catch {}
                 pollStatus();
             });
 
@@ -272,7 +272,7 @@ async function pollStatus() {
             addActionBtn('Delete', 'btn-danger', 'delete', p.id).addEventListener('click', async function() {
                 if (!confirm('Delete this sync pair?')) return;
                 this.disabled = true; this.textContent = 'Deleting...';
-                try { await fetch('/api/sync-pairs/' + this.dataset.id, { method: 'DELETE' }); } catch(e) {}
+                try { await fetch('/api/sync-pairs/' + this.dataset.id, { method: 'DELETE' }); } catch {}
                 pollStatus();
             });
 
@@ -365,7 +365,7 @@ async function saveEdit() {
         }
         let warns = warningsText(json.warnings);
         if (warns) alert(warns);
-    } catch(e) {
+    } catch {
         alert('Network error');
         return;
     }
@@ -400,7 +400,7 @@ function showErrorModal(pairId, pairName) {
                 msgDiv.textContent = l.error_msg || 'Unknown error';
                 el.appendChild(d);
             });
-        } catch(e) {
+        } catch {
             el.textContent = 'Failed to load errors.';
         }
     })();

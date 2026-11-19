@@ -111,6 +111,10 @@ func (s *Server) createSyncPair(c *gin.Context) {
 		return
 	}
 	p := in.SyncPair
+	// A JSON body cannot distinguish an omitted worker_count from an explicit 0,
+	// so zero means "use the default" here. The CLI is not affected: its flags
+	// carry the default, which is why --workers 0 is visible and rejected.
+	p.ApplyDefaults()
 
 	tgt, err := s.repo.GetBucket(p.TargetBucketID)
 	if err != nil {

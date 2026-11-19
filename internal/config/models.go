@@ -18,6 +18,30 @@ type Bucket struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// DefaultSyncIntervalSeconds and DefaultWorkerCount are what an omitted value
+// becomes. They are applied explicitly (ApplyDefaults) rather than at read time,
+// so a stored pair always carries the numbers it actually runs with.
+const (
+	DefaultSyncIntervalSeconds = 300
+	DefaultWorkerCount         = 10
+)
+
+// ApplyDefaults fills the settings whose zero value means "not specified".
+//
+// Only for callers that cannot tell "absent" from "zero": a JSON body that omits
+// worker_count and one that sends 0 are the same thing to encoding/json. The CLI
+// is different — its flags carry the default, so an explicit --workers 0 is
+// visible as 0 and is rejected by ValidatePairOptions instead of being quietly
+// replaced.
+func (p *SyncPair) ApplyDefaults() {
+	if p.SyncInterval <= 0 {
+		p.SyncInterval = DefaultSyncIntervalSeconds
+	}
+	if p.WorkerCount <= 0 {
+		p.WorkerCount = DefaultWorkerCount
+	}
+}
+
 type SyncPair struct {
 	ID                      string     `json:"id"`
 	Name                    string     `json:"name"`

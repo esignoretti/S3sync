@@ -150,12 +150,9 @@ func (in *SetupInput) ToSyncPair(srcName, tgtName string) *SyncPair {
 	} else {
 		p.DeletePropagation = true
 	}
-	if p.SyncInterval <= 0 {
-		p.SyncInterval = 300
-	}
-	if p.WorkerCount <= 0 {
-		p.WorkerCount = 10
-	}
+	// The wizard posts JSON, which cannot distinguish an omitted field from an
+	// explicit zero, so a zero here means "use the default".
+	p.ApplyDefaults()
 	return p
 }
 

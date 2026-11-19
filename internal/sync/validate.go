@@ -13,6 +13,19 @@ var (
 	// ErrComplianceNeedsConfirm indicates a COMPLIANCE default retention was
 	// requested without the operator's explicit acceptance.
 	ErrComplianceNeedsConfirm = errors.New("compliance retention needs explicit confirmation")
+	// MaxWorkerCount bounds the worker pool. Each worker holds one in-flight
+	// request, so the practical limit is the endpoint's connection budget; the
+	// cap exists to reject typos, not to tune throughput.
+	MaxWorkerCount = 256
+
+	// ErrInvalidWorkerCount indicates a worker count outside 1..MaxWorkerCount.
+	// Zero is the dangerous one: no goroutine drains the actions channel, so a
+	// run silently copies nothing and reports status "ok".
+	ErrInvalidWorkerCount = errors.New("invalid worker count")
+	// ErrInvalidSyncInterval indicates a sync interval that is not positive.
+	// Zero makes the serve loop spin as fast as it can, which hammers both
+	// buckets and the config database.
+	ErrInvalidSyncInterval = errors.New("invalid sync interval")
 	// ErrExpireEarlierNeedsConfirm indicates a target expiry was moved earlier
 	// without the operator's explicit confirmation.
 	ErrExpireEarlierNeedsConfirm = errors.New("moving target expiry earlier needs confirmation")
@@ -48,6 +61,22 @@ func ValidatePairOptions(pair *config.SyncPair, retentionMode string, retentionD
 		now = time.Now().UTC()
 	}
 	now = now.UTC()
+
+	// A zero or negative worker count is not a small problem: with no goroutine
+	// draining the actions channel the run copies NOTHING and still reports
+	// status "ok", so a pair created with --workers 0 looks healthy forever while
+	// the target stays empty. Negative values are equally meaningless.
+	if pair.WorkerCount < 1 || pair.WorkerCount > MaxWorkerCount {
+		return nil, fmt.Errorf("%w: %d is outside 1..%d", ErrInvalidWorkerCount,
+			pair.WorkerCount, MaxWorkerCount)
+	}
+
+	// A non-positive interval makes the serve loop fire back to back with no
+	// delay: measured at 79 sync cycles in 8 seconds for interval=0, each one
+	// listing both buckets and writing the config database.
+	if pair.SyncInterval <= 0 {
+		return nil, fmt.Errorf("%w: %ds must be positive", ErrInvalidSyncInterval, pair.SyncInterval)
+	}
 
 	// COMPLIANCE retention cannot be shortened or bypassed by anyone, including
 	// the operator, so accepting it is a decision that has to be deliberate.

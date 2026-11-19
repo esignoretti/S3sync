@@ -43,7 +43,7 @@ func TestReconcileOffByDefault(t *testing.T) {
 // expired" rather than "your input is malformed".
 func TestPreflightRejectsPastDate(t *testing.T) {
 	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	pair := &appconfig.SyncPair{TargetExpireAt: &past}
+	pair := &appconfig.SyncPair{SyncInterval: 300, WorkerCount: 10, TargetExpireAt: &past}
 	_, err := appsync.ValidatePairOptions(pair, "", 0, false, true, nil, false, time.Now().UTC())
 	if !errors.Is(err, appsync.ErrExpireInPast) {
 		t.Fatalf("preflight error = %v, want ErrExpireInPast", err)
@@ -55,7 +55,7 @@ func TestPreflightRejectsPastDate(t *testing.T) {
 // provisioning failure from the endpoint.
 func TestPreflightRejectsNonMidnightDate(t *testing.T) {
 	at := time.Now().UTC().AddDate(0, 0, 30).Truncate(24 * time.Hour).Add(time.Hour)
-	pair := &appconfig.SyncPair{TargetExpireAt: &at}
+	pair := &appconfig.SyncPair{SyncInterval: 300, WorkerCount: 10, TargetExpireAt: &at}
 	_, err := appsync.ValidatePairOptions(pair, "", 0, false, true, nil, false, time.Now().UTC())
 	if !errors.Is(err, appsync.ErrExpireNotMidnight) {
 		t.Fatalf("preflight error = %v, want ErrExpireNotMidnight", err)
