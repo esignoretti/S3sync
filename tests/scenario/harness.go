@@ -1151,3 +1151,30 @@ func lifecycleHasRule(t *testing.T, client *s3.Client, bucket, id string) bool {
 	}
 	return contains(ruleIDs(cfg.Rules), id)
 }
+
+// leakedBuckets lists scratch buckets left behind by a previous run. A `go test`
+// timeout panics without running cleanups, so a killed run leaves buckets that
+// bill forever on this endpoint and that nothing else would ever mention.
+func leakedBuckets(t *testing.T, client *s3.Client) []string {
+	t.Helper()
+	out, err := client.ListBuckets(context.Background(), &s3.ListBucketsInput{})
+	if err != nil {
+		t.Fatalf("list buckets: %v", err)
+	}
+	var leaked []string
+	for _, b := range out.Buckets {
+		name := aws.ToString(b.Name)
+		if !strings.HasPrefix(name, "s3sync-sc-") {
+			continue
+		}
+		// ListBuckets on this endpoint is eventually consistent and keeps
+		// reporting buckets that are already gone, so confirm with a HEAD before
+		// claiming a leak — otherwise the report is pure noise and gets ignored.
+		if _, err := client.HeadBucket(context.Background(), &s3.HeadBucketInput{
+			Bucket: aws.String(name),
+		}); err == nil {
+			leaked = append(leaked, name)
+		}
+	}
+	return leaked
+}

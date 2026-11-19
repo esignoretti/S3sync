@@ -123,3 +123,13 @@ func TestCleanupBucketHonoursScenarioKeep(t *testing.T) {
 		}
 	})
 }
+
+// TestLeakedBucketsIsQuietAfterACleanRun reports, rather than fails, on buckets
+// left behind by an earlier killed run: they are not this run's fault, but they
+// bill forever and nothing else would ever mention them.
+func TestLeakedBucketsIsQuietAfterACleanRun(t *testing.T) {
+	client, _ := newClient(t)
+	if leaked := leakedBuckets(t, client); len(leaked) > 0 {
+		t.Logf("LEAKED %d scratch bucket(s) from an earlier run: %v — delete them", len(leaked), leaked)
+	}
+}
