@@ -1,0 +1,229 @@
+// tests/scenario/scenario_attrs_test.go
+//go:build integration
+
+package scenario
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+)
+
+func TestScenarioMetadata(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true})
+	putBody(t, e.Client, e.Source, "doc.txt", "body", func(in *s3.PutObjectInput) {
+		in.ContentType = aws.String("text/csv")
+		in.ContentDisposition = aws.String(`attachment; filename="doc.csv"`)
+		in.CacheControl = aws.String("max-age=3600")
+		in.Metadata = map[string]string{"origin": "prod", "tier": "hot"}
+	})
+	e.sync()
+	f := fetchFacts(t, e.Client, e.Target, "doc.txt")
+	if f.ContentType != "text/csv" {
+		t.Fatalf("content-type = %q, want text/csv", f.ContentType)
+	}
+	if f.Metadata["origin"] != "prod" || f.Metadata["tier"] != "hot" {
+		t.Fatalf("metadata = %v, want origin=prod tier=hot", f.Metadata)
+	}
+}
+
+func TestScenarioTags(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true})
+	putBody(t, e.Client, e.Source, "doc.txt", "body")
+	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "alpha", "env": "prod"})
+	e.sync()
+	if f := fetchFacts(t, e.Client, e.Target, "doc.txt"); f.Tags["team"] != "alpha" || f.Tags["env"] != "prod" {
+		t.Fatalf("target tags = %v, want team=alpha env=prod", f.Tags)
+	}
+}
+
+// TestScenarioEmptyTagsClearsTarget pins the endpoint behaviour the writer
+// depends on: PutObjectTagging with an empty TagSet is accepted and clears the
+// target's tags. If it were rejected, a source whose tags were removed could
+// never converge.
+func TestScenarioEmptyTagsClearsTarget(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 60})
+	putBody(t, e.Client, e.Source, "doc.txt", "body")
+	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "alpha"})
+	e.sync()
+	deleteTags(t, e.Client, e.Source, "doc.txt")
+	e.reconcile()
+	if f := fetchFacts(t, e.Client, e.Target, "doc.txt"); len(f.Tags) != 0 {
+		t.Fatalf("target tags = %v after the source's tags were removed, want none", f.Tags)
+	}
+}
+
+func TestScenarioTagDriftRepaired(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 60})
+	putBody(t, e.Client, e.Source, "doc.txt", "body")
+	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "alpha"})
+	e.sync()
+	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "beta"})
+	e.reconcile()
+	if f := fetchFacts(t, e.Client, e.Target, "doc.txt"); f.Tags["team"] != "beta" {
+		t.Fatalf("target tag team = %q after drift, want beta", f.Tags["team"])
+	}
+}
+
+// TestScenarioMetadataDriftRepaired is the sweep's reason to exist: a metadata
+// change bumps neither the ETag nor LastModified, so the differ cannot see it.
+func TestScenarioMetadataDriftRepaired(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 60})
+	putBody(t, e.Client, e.Source, "doc.txt", "body", func(in *s3.PutObjectInput) {
+		in.Metadata = map[string]string{"rev": "1"}
+	})
+	e.sync()
+	copySelfWithMetadata(t, e.Client, e.Source, "doc.txt", map[string]string{"rev": "2"})
+	e.reconcile()
+	if f := fetchFacts(t, e.Client, e.Target, "doc.txt"); f.Metadata["rev"] != "2" {
+		t.Fatalf("target metadata rev = %q after drift, want 2", f.Metadata["rev"])
+	}
+}
+
+// TestScenarioStorageClassOverride is the scenario that would have caught the
+// writer/reader fingerprint mismatch fixed earlier in this project: the writer
+// hashed the effective TARGET class while the sweep hashed the raw source
+// class, so every pair with TargetStorageClass set re-copied every object every
+// sweep. A quiet second sync after the copy AND after a sweep is the assertion.
+func TestScenarioStorageClassOverride(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 60})
+	e.Pair.TargetStorageClass = "STANDARD"
+	putBody(t, e.Client, e.Source, "doc.txt", "body")
+	e.sync()
+
+	// The target must end up in the configured class.
+	//
+	// LIMIT worth stating: this endpoint accepts only STANDARD, and a plain
+	// PutObject already reports STANDARD, so on THIS endpoint the class value
+	// cannot distinguish "override applied" from "never applied". What the
+	// scenario really pins is the fingerprint round-trip with an override
+	// configured — the writer hashing the effective target class while the sweep
+	// hashed the raw source class was a real bug that made every pair with
+	// TargetStorageClass set re-copy every object every sweep. The quiet second
+	// sync and quiet post-sweep sync below are what catch that. The class check
+	// becomes discriminating on an endpoint that honours other classes.
+	head, err := e.Client.HeadObject(context.Background(), &s3.HeadObjectInput{
+		Bucket: aws.String(e.Target), Key: aws.String("doc.txt"),
+	})
+	if err != nil {
+		t.Fatalf("head target: %v", err)
+	}
+	if head.StorageClass != types.StorageClassStandard {
+		t.Fatalf("target storage class = %q, want STANDARD", head.StorageClass)
+	}
+
+	e.assertNoWorkOnSecondSync()
+	e.reconcile()
+	e.assertNoWorkOnSecondSync()
+}
+
+// TestScenarioUnreplicableFields pins that Content-Language and Expires are
+// deliberately excluded, by asserting the OUTCOME: this endpoint does not store
+// them at all, so the source loses them too and the target cannot carry them.
+//
+// Asserting only "no drift on the next sweep" would prove nothing: the writer
+// and the sweep both fingerprint the SOURCE head, so the hash agrees whether or
+// not those fields are in it, and the sweep never compares source against
+// target. The drift assertion is kept as a secondary check.
+func TestScenarioUnreplicableFields(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 60})
+	putBody(t, e.Client, e.Source, "doc.txt", "body", func(in *s3.PutObjectInput) {
+		in.ContentLanguage = aws.String("en-GB")
+		in.Expires = aws.Time(time.Now().Add(24 * time.Hour))
+		in.ContentType = aws.String("text/plain")
+	})
+	e.sync()
+
+	tgt := fetchFacts(t, e.Client, e.Target, "doc.txt")
+	if tgt.ContentType != "text/plain" {
+		t.Fatalf("content-type = %q, want text/plain (this field IS stored and must replicate)", tgt.ContentType)
+	}
+	// The point of the scenario: neither side retains what cannot be replicated,
+	// so nothing can diverge over it.
+	src := fetchFacts(t, e.Client, e.Source, "doc.txt")
+	if src.ContentLanguage != "" || tgt.ContentLanguage != "" {
+		t.Fatalf("content-language src=%q tgt=%q; the fixture assumes this endpoint does not store it",
+			src.ContentLanguage, tgt.ContentLanguage)
+	}
+	if src.Expires != nil || tgt.Expires != nil {
+		t.Fatalf("expires src=%v tgt=%v; the fixture assumes this endpoint does not store it",
+			src.Expires, tgt.Expires)
+	}
+
+	e.assertNoWorkOnSecondSync()
+	e.reconcile()
+	e.assertNoWorkOnSecondSync()
+}
+
+// TestScenarioPendingAttrsRecovery covers the attribute-only retry: when a tag
+// write fails the object is marked pending, and the next run must rewrite the
+// characteristics WITHOUT copying the bytes again.
+func TestScenarioPendingAttrsRecovery(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true})
+	putBody(t, e.Client, e.Source, "doc.txt", "body")
+	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "alpha"})
+	e.sync()
+
+	// Change the source's tag BEFORE marking pending, so the recovery has
+	// something to do: asserting the target still says alpha would pass even if
+	// the attribute-only retry never ran, because the first sync already put it
+	// there.
+	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "beta"})
+	e.markPending("doc.txt")
+	e.Counter.Reset()
+	e.sync()
+	if got := e.Counter.Count(kindPutObject) + e.Counter.Count(kindCopyObject); got != 0 {
+		t.Fatalf("a pending-attributes object was re-copied (%d byte writes), want attributes only", got)
+	}
+	if got := e.Counter.Count(kindPutTagging); got == 0 {
+		t.Fatal("a pending-attributes object did not get its tags written")
+	}
+	if f := fetchFacts(t, e.Client, e.Target, "doc.txt"); f.Tags["team"] != "beta" {
+		t.Fatalf("target tag team = %q after recovery, want beta", f.Tags["team"])
+	}
+}
+
+// TestScenarioAttrsOff is the control: with replication off the worker must not
+// spend a request reading or writing tags, because every extra request costs
+// ~750ms on this endpoint.
+//
+// It deliberately does NOT assert "no tags on the target". This endpoint's
+// CopyObject carries the source's tags by default (TaggingDirective defaults to
+// COPY) — only an inline x-amz-tagging header is ignored — so tags ride along
+// with the bytes whether or not replication is on. What replication-off buys is
+// the absence of the extra GetObjectTagging/PutObjectTagging round-trip.
+func TestScenarioAttrsOff(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: false})
+	putBody(t, e.Client, e.Source, "doc.txt", "body")
+	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "alpha"})
+	e.sync()
+	if got := e.Counter.Count(kindGetTagging); got != 0 {
+		t.Fatalf("replication is off but %d GetObjectTagging calls were made", got)
+	}
+	if got := e.Counter.Count(kindPutTagging); got != 0 {
+		t.Fatalf("replication is off but %d PutObjectTagging calls were made", got)
+	}
+	// The copy itself must still have happened.
+	e.assertTargetCount(1)
+}
+
+// TestScenarioInvalidStorageClass records the endpoint's real constraint: only
+// STANDARD is accepted, so any other value must fail loudly rather than
+// silently produce an object in the wrong class.
+func TestScenarioInvalidStorageClass(t *testing.T) {
+	e := newScenarioEnv(t, envOptions{})
+	e.Pair.TargetStorageClass = "GLACIER"
+	putBody(t, e.Client, e.Source, "doc.txt", "body")
+	out := e.syncOutcome()
+	if out.Failed == 0 {
+		t.Fatalf("an invalid storage class was accepted (status %q)", out.Status)
+	}
+	if !strings.Contains(strings.ToLower(out.Log), "storage class") {
+		t.Fatalf("the failure does not mention the storage class: %q", out.Log)
+	}
+}

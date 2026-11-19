@@ -67,6 +67,11 @@ func shouldWebhook(events, status string) bool {
 	}
 	for _, e := range strings.Split(events, ",") {
 		e = strings.TrimSpace(e)
+		// "success" is what the UI label, the original spec and the README call a
+		// clean run; the status column spells it "ok". Accept both.
+		if e == "success" {
+			e = "ok"
+		}
 		if e == status || e == "all" {
 			return true
 		}

@@ -19,24 +19,34 @@ type Bucket struct {
 }
 
 type SyncPair struct {
-	ID                 string     `json:"id"`
-	Name               string     `json:"name"`
-	SourceBucketID     string     `json:"source_bucket_id"`
-	TargetBucketID     string     `json:"target_bucket_id"`
-	SyncInterval       int        `json:"sync_interval"`
-	WorkerCount        int        `json:"worker_count"`
-	MaxGetOpsPerMinute int        `json:"max_get_ops_per_minute"`
-	DeletePropagation  bool       `json:"delete_propagation"`
-	TargetStorageClass string     `json:"target_storage_class,omitempty"`
-	Enabled            bool       `json:"enabled"`
-	DryRun             bool       `json:"dry_run"`
-	WebhookURL         string     `json:"webhook_url,omitempty"`
-	WebhookEvents      string     `json:"webhook_events,omitempty"`
-	LastSyncAt         *time.Time `json:"last_sync_at,omitempty"`
-	LastSyncStatus     string     `json:"last_sync_status"`
-	ConsecutiveErrors  int        `json:"consecutive_errors"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                      string     `json:"id"`
+	Name                    string     `json:"name"`
+	SourceBucketID          string     `json:"source_bucket_id"`
+	TargetBucketID          string     `json:"target_bucket_id"`
+	SyncInterval            int        `json:"sync_interval"`
+	WorkerCount             int        `json:"worker_count"`
+	MaxGetOpsPerMinute      int        `json:"max_get_ops_per_minute"`
+	DeletePropagation       bool       `json:"delete_propagation"`
+	TargetStorageClass      string     `json:"target_storage_class,omitempty"`
+	Enabled                 bool       `json:"enabled"`
+	DryRun                  bool       `json:"dry_run"`
+	WebhookURL              string     `json:"webhook_url,omitempty"`
+	WebhookEvents           string     `json:"webhook_events,omitempty"`
+	LastSyncAt              *time.Time `json:"last_sync_at,omitempty"`
+	LastSyncStatus          string     `json:"last_sync_status"`
+	ConsecutiveErrors       int        `json:"consecutive_errors"`
+	ReplicateAttributes     bool       `json:"replicate_attributes"`
+	TargetExpireAt          *time.Time `json:"target_expire_at,omitempty"`
+	NoncurrentExpireDays    int        `json:"noncurrent_expire_days,omitempty"`
+	NewerNoncurrentVersions int        `json:"newer_noncurrent_versions,omitempty"`
+	RequireObjectLock       bool       `json:"require_object_lock"`
+	OnLockMissing           string     `json:"on_lock_missing"`
+	AttrsReconcileInterval  int        `json:"attrs_reconcile_interval"`
+	ProvisionedAt           *time.Time `json:"provisioned_at,omitempty"`
+	ProvisionError          string     `json:"provision_error,omitempty"`
+	LastReconcileAt         *time.Time `json:"last_reconcile_at,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
 }
 
 type SyncLogEntry struct {

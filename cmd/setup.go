@@ -6,8 +6,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/esignoretti/S3sync/internal/config"
+	"github.com/esignoretti/S3sync/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +26,24 @@ with interactive prompts. Run this on a fresh install to get started.`,
 		defer close()
 
 		s := config.NewSetupState()
+		// The interactive wizard runs the same preflight as `pair add`, so a
+		// target that cannot be prepared fails here rather than on every cycle.
+		s.Provision = func(p *config.SyncPair) error {
+			tgt, err := repo.GetBucket(p.TargetBucketID)
+			if err != nil {
+				return fmt.Errorf("get target bucket: %w", err)
+			}
+			warns, err := sync.ValidatePairOptions(p, tgt.RetentionMode, tgt.RetentionDays,
+				false, true, nil, false, time.Now().UTC())
+			if err != nil {
+				return err
+			}
+			for _, w := range warns {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", w.Message)
+			}
+			return sync.ProvisionPair(cmd.Context(), repo, p,
+				sync.ProvisionOptions{Now: time.Now().UTC()})
+		}
 		scanner := bufio.NewScanner(os.Stdin)
 
 		for s.Step < config.StepDone {
@@ -56,6 +76,15 @@ with interactive prompts. Run this on a fresh install to get started.`,
 				}
 				p.SourceBucketID = s.SourceBucket.ID
 				p.TargetBucketID = s.TargetBucket.ID
+				// The preflight installed above must run before the pair is
+				// persisted, exactly as on the pair-add and API paths: a pair whose
+				// target cannot be prepared would otherwise be written and then
+				// fail every object on every cycle.
+				if s.Provision != nil {
+					if err := s.Provision(p); err != nil {
+						return fmt.Errorf("sync pair: %w", err)
+					}
+				}
 				if err := repo.CreateSyncPair(p); err != nil {
 					return fmt.Errorf("create sync pair: %w", err)
 				}

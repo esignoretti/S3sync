@@ -27,7 +27,7 @@ func openConfig() (*config.Repository, func(), error) {
 	return config.NewRepository(db), func() { db.Close() }, nil
 }
 
-var configCmd = &cobra.Command{Use: "config", Short: "Manage configuration"}
+var configCmd = groupCommand("config", "Manage configuration")
 
 var configInitCmd = &cobra.Command{
 	Use:   "init",
@@ -52,7 +52,53 @@ var configShowCmd = &cobra.Command{
 	},
 }
 
+// configGetCmd prints one global setting. An unknown key is an error rather than
+// a silent empty line: a typo must not look like "the value is blank".
+var configGetCmd = &cobra.Command{
+	Use:   "get <key>",
+	Short: "Read a global setting",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		repo, closeFn, err := openConfig()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		st, err := repo.GetSettings()
+		if err != nil {
+			return err
+		}
+		switch args[0] {
+		case config.SettingRunTimeoutSeconds:
+			fmt.Println(st.RunTimeoutSeconds)
+		default:
+			return fmt.Errorf("unknown setting %q (known: %s)", args[0], config.SettingRunTimeoutSeconds)
+		}
+		return nil
+	},
+}
+
+// configSetCmd writes one global setting. The range check lives in
+// config.SetSetting so this and the API cannot disagree about it.
+var configSetCmd = &cobra.Command{
+	Use:   "set <key> <value>",
+	Short: "Write a global setting",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		repo, closeFn, err := openConfig()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		if err := repo.SetSetting(args[0], args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("%s = %s\n", args[0], args[1])
+		return nil
+	},
+}
+
 func init() {
-	configCmd.AddCommand(configInitCmd, configShowCmd)
+	configCmd.AddCommand(configInitCmd, configShowCmd, configGetCmd, configSetCmd)
 	rootCmd.AddCommand(configCmd)
 }

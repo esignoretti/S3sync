@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -12,11 +13,32 @@ import (
 	"github.com/esignoretti/S3sync/internal/config"
 )
 
+// ErrPairExpired reports a pair whose target lifecycle expiry date has passed.
+// The run refuses instead of copying objects the target will delete again: per
+// the design, the pair is finished rather than broken, and the recovery is
+// moving target_expire_at into the future.
+var ErrPairExpired = errors.New("sync pair target expiry has passed")
+
+// ErrObjectsFailed reports a run that completed but could not copy every
+// object. The run itself is over — this is not a transient condition the caller
+// should retry differently — but the outcome is a failure, and the caller has to
+// be able to tell.
+//
+// RunOnce returns nil for it only if the caller reads the status instead. A
+// one-shot `pair sync` driven by cron has no such reader: without this error it
+// exits 0 while objects failed to copy, so the scheduler never sees the failure
+// and nothing retries or alerts.
+var ErrObjectsFailed = errors.New("one or more objects failed to copy")
+
 type Progress struct {
 	mu        sync.Mutex
 	Total     int `json:"total"`
 	Completed int `json:"completed"`
 	Failed    int `json:"failed"`
+	// Pending counts objects whose bytes were copied but whose characteristics
+	// were only partially applied. The copy did happen, so they are completed
+	// work too; the separate count is what makes the incomplete part visible.
+	Pending int `json:"pending"`
 }
 
 func (p *Progress) Add(err bool) {
@@ -28,6 +50,21 @@ func (p *Progress) Add(err bool) {
 	p.mu.Unlock()
 }
 
+// AddPending records one object that completed without fully applying its
+// characteristics.
+func (p *Progress) AddPending() {
+	p.mu.Lock()
+	p.Pending++
+	p.Completed++
+	p.mu.Unlock()
+}
+
+func (p *Progress) PendingCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Pending
+}
+
 func (p *Progress) Snapshot() (total, completed, failed int) {
 	p.mu.Lock()
 	total = p.Total
@@ -37,47 +74,126 @@ func (p *Progress) Snapshot() (total, completed, failed int) {
 	return
 }
 
-type Engine struct {
-	pair      *config.SyncPair
-	src       *config.Bucket
-	tgt       *config.Bucket
-	srcS3     *s3.Client
-	tgtS3     *s3.Client
-	store     *cache.Store
-	throttler *Throttler
-	pool      *WorkerPool
+// SnapshotFull is Snapshot plus the pending count, for callers that report it.
+func (p *Progress) SnapshotFull() (total, completed, failed, pending int) {
+	p.mu.Lock()
+	total, completed, failed = p.Total, p.Completed, p.Failed
+	pending = p.Pending
+	p.mu.Unlock()
+	return
+}
 
-	mu         sync.Mutex
-	running    bool
-	lastRun    time.Time
-	lastStatus string
-	lastError  string
-	progress   *Progress
+// Reset clears the per-run counters. It takes p.mu like every other accessor:
+// the CLI polls Status every 2s while a run is in progress, and Status reads
+// these fields through SnapshotFull.
+func (p *Progress) Reset() {
+	p.mu.Lock()
+	p.Total = 0
+	p.Completed = 0
+	p.Failed = 0
+	p.Pending = 0
+	p.mu.Unlock()
+}
+
+// SetTotal records how much work the finished run turned out to be.
+func (p *Progress) SetTotal(n int) {
+	p.mu.Lock()
+	p.Total = n
+	p.mu.Unlock()
+}
+
+type Engine struct {
+	pair       *config.SyncPair
+	src        *config.Bucket
+	tgt        *config.Bucket
+	srcS3      *s3.Client
+	tgtS3      *s3.Client
+	store      *cache.Store
+	throttler  *Throttler
+	pool       *WorkerPool
+	settingsFn func() config.Settings
+
+	mu            sync.Mutex
+	running       bool
+	lastRun       time.Time
+	lastStatus    string
+	lastError     string
+	progress      *Progress
 	lastResult    *Progress
 	lastSucceeded int
 	lastFailed    int
 	cancel        context.CancelFunc
 
+	// sweepCursor is the last key the drift sweep fully examined. "" means the
+	// next sweep starts at the front. It is in-memory: a restart re-walks from
+	// the beginning, which is harmless, and persisting it would add a write to
+	// every sweep.
+	sweepCursor string
+
 	setupOnce sync.Once
+	setupErr  error
 }
 
 func NewEngine(pair *config.SyncPair, src, tgt *config.Bucket,
-	srcS3, tgtS3 *s3.Client, cacheStore *cache.Store) *Engine {
+	srcS3, tgtS3 *s3.Client, cacheStore *cache.Store,
+	settingsFn func() config.Settings) *Engine {
 
 	thr := NewThrottler(pair.MaxGetOpsPerMinute)
 	progress := &Progress{}
+	pool := NewWorkerPool(pair.WorkerCount, srcS3, tgtS3,
+		src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass, progress, pair.ReplicateAttributes)
 	return &Engine{
-		pair:      pair,
-		src:       src,
-		tgt:       tgt,
-		srcS3:     srcS3,
-		tgtS3:     tgtS3,
-		store:     cacheStore,
-		throttler: thr,
-		pool: NewWorkerPool(pair.WorkerCount, tgtS3,
-			src.BucketName, tgt.BucketName, thr, pair.TargetStorageClass, progress),
-		progress: progress,
+		pair:       pair,
+		src:        src,
+		tgt:        tgt,
+		srcS3:      srcS3,
+		tgtS3:      tgtS3,
+		store:      cacheStore,
+		throttler:  thr,
+		pool:       pool,
+		progress:   progress,
+		settingsFn: settingsFn,
 	}
+}
+
+// SweepCursor reports the sweep's resume point, for tests and diagnostics.
+func (e *Engine) SweepCursor() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sweepCursor
+}
+
+// advanceCursor records how far the sweep got, so a sweep stopped by its budget
+// resumes at the next key instead of re-walking from the front. Without this a
+// cache larger than one budget's worth of work never converges: every run pays
+// the full budget and examines the same prefix, so drift past the cut-off is
+// invisible forever.
+func (e *Engine) advanceCursor(key string) {
+	e.mu.Lock()
+	e.sweepCursor = key
+	e.mu.Unlock()
+}
+
+// settings returns the current global settings. It is called at the start of
+// every run rather than at construction: an engine holding a stale copy of its
+// configuration is a bug this project has already shipped once, and reading per
+// run makes that staleness structurally impossible here.
+func (e *Engine) settings() config.Settings {
+	st := config.Settings{RunTimeoutSeconds: config.DefaultRunTimeoutSeconds}
+	if e.settingsFn != nil {
+		st = e.settingsFn()
+	}
+	// Defend against a zero or negative timeout from any future settings source:
+	// context.WithTimeout(ctx, 0) expires immediately, so every run would fail
+	// with a deadline error that names nothing.
+	//
+	// Only non-positive values are replaced. Clamping up to MinRunTimeoutSeconds
+	// would silently ignore a smaller value a caller deliberately set, which is
+	// how the timeout tests drive a sub-second budget.
+	if st.RunTimeoutSeconds <= 0 {
+		st.RunTimeoutSeconds = config.DefaultRunTimeoutSeconds
+	}
+	return st
 }
 
 func (e *Engine) RunOnce(ctx context.Context) error {
@@ -89,18 +205,40 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	e.running = true
 	e.mu.Unlock()
 
+	defer func() {
+		e.mu.Lock()
+		e.running = false
+		e.mu.Unlock()
+	}()
+
 	e.mu.Lock()
-	if e.progress.Total > 0 || e.progress.Completed > 0 {
-		e.lastResult = &Progress{Total: e.progress.Total, Completed: e.progress.Completed, Failed: e.progress.Failed}
+	total, completed, failed, pending := e.progress.SnapshotFull()
+	if total > 0 || completed > 0 {
+		e.lastResult = &Progress{
+			Total: total, Completed: completed,
+			Failed: failed, Pending: pending,
+		}
 	}
-	e.progress.Total = 0
-	e.progress.Completed = 0
-	e.progress.Failed = 0
 	e.lastError = ""
 	e.mu.Unlock()
+	e.progress.Reset()
 
-	timeout := 5 * time.Minute
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	// A lifecycle Expiration.Date already in the past has the target deleting
+	// objects as fast as this run copies them while the source still holds them,
+	// so every reset or cache loss re-copies what has already expired, forever.
+	// Refuse before touching anything: the pair has reached end of life.
+	if e.pair.TargetExpireAt != nil && time.Now().UTC().After(*e.pair.TargetExpireAt) {
+		e.setResult("expired", fmt.Sprintf("target expiry passed at %s",
+			e.pair.TargetExpireAt.UTC().Format(time.RFC3339)))
+		return ErrPairExpired
+	}
+
+	// The timeout is a setting read here, at the start of every run, rather than
+	// captured at construction: five minutes was too short for any real bucket,
+	// and an engine holding a stale copy of its configuration is a bug this
+	// project has already shipped once.
+	runTimeout := time.Duration(e.settings().RunTimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	e.mu.Lock()
 	if e.cancel != nil {
 		e.cancel()
@@ -110,7 +248,6 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 
 	defer func() {
 		e.mu.Lock()
-		e.running = false
 		e.cancel = nil
 		e.mu.Unlock()
 		cancel()
@@ -119,13 +256,45 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	slog.Info("sync start", "pair", e.pair.Name)
 	startTime := time.Now()
 
+	// Provisioning failures are exactly what this preflight exists to prevent, so
+	// they fail the run instead of being logged and swallowed: carrying on would
+	// copy every object into a target that rejects it and report a run full of
+	// per-object failures rather than the one real cause. setupOnce still means
+	// one attempt per engine; the recorded error is what every later run returns.
 	e.setupOnce.Do(func() {
+		// A dry run reports what would happen; it must not create a bucket or
+		// rewrite a lifecycle configuration. Provisioning is skipped rather than
+		// attempted-and-undone, because neither operation can be undone.
+		if e.pair.DryRun {
+			slog.Info("dry-run: skipping target provisioning", "pair", e.pair.Name)
+			return
+		}
 		setupCtx, setupCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer setupCancel()
-		if err := SetupTargetBucket(setupCtx, e.tgtS3, e.src.Region, e.tgt); err != nil {
-			slog.Warn("target bucket setup", "pair", e.pair.Name, "error", err)
+		err := ProvisionTarget(setupCtx, e.tgtS3, e.src.Region, e.tgt, e.pair,
+			ProvisionOptions{Now: time.Now().UTC()})
+
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if err != nil {
+			e.setupErr = err
+			e.pair.ProvisionError = err.Error()
+			e.pair.ProvisionedAt = nil
+			return
 		}
+		provisionedAt := time.Now().UTC()
+		e.setupErr = nil
+		e.pair.ProvisionError = ""
+		e.pair.ProvisionedAt = &provisionedAt
 	})
+
+	e.mu.Lock()
+	setupErr := e.setupErr
+	e.mu.Unlock()
+	if setupErr != nil {
+		e.setResult("error", fmt.Sprintf("provision target: %v", setupErr))
+		return fmt.Errorf("provision target: %w", setupErr)
+	}
 
 	cacheCur, closeCur, err := e.store.NewCursor(e.pair.ID)
 	if err != nil {
@@ -135,6 +304,29 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 
 	actions := make(chan SyncAction, 10000)
 	diffErrCh := make(chan error, 1)
+
+	// The drift sweep is the only detector for characteristics that changed
+	// without bumping the ETag or LastModified. It writes into the same channel
+	// the diff does, so it runs in its own goroutine and the diff's goroutine
+	// waits for it: the sweep must not overlap the diff (only the diff closes the
+	// channel), and it must not run inline either, because it can emit more
+	// actions than the buffer holds while nothing is reading yet. The consumer
+	// below therefore starts before either producer.
+	// The sweep gets a share of the run budget, not all of it: an uncapped sweep
+	// over a large cache can spend the entire timeout and leave the diff with
+	// nothing, so no object is ever copied while the sweep reports health.
+	// Expiring here degrades to "the sweep did less work this run" — the cursor
+	// makes that recoverable — and the diff still runs.
+	sweepDue := ShouldReconcile(e.pair, time.Now().UTC()) && !e.pair.DryRun
+	sweepErrCh := make(chan error, 1)
+	if sweepDue {
+		sweepBudget := runTimeout / 4
+		go func() {
+			sweepCtx, sweepCancel := context.WithTimeout(ctx, sweepBudget)
+			defer sweepCancel()
+			sweepErrCh <- e.reconcileSweep(sweepCtx, actions)
+		}()
+	}
 
 	listPage := func(ctx context.Context, token *string) (*s3.ListObjectsV2Output, error) {
 		reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -156,33 +348,54 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 				diffErrCh <- fmt.Errorf("diff panic: %v", r)
 			}
 		}()
+		// The sweep writes into the same channel the diff does, and the diff is
+		// what closes it, so the diff must not start until the sweep is done.
+		// Waiting here (rather than running the sweep inline) is what keeps the
+		// two producers from overlapping on a channel only one of them closes.
+		if sweepDue {
+			if err := <-sweepErrCh; err != nil {
+				slog.Warn("reconcile sweep", "pair", e.pair.Name, "error", err)
+			} else {
+				sweptAt := time.Now().UTC()
+				e.mu.Lock()
+				e.pair.LastReconcileAt = &sweptAt
+				e.mu.Unlock()
+			}
+		}
 		err := StreamingDiff(ctx, listPage, cacheCur, e.pair.DeletePropagation, actions)
 		diffErrCh <- err
 	}()
 
-	var succeeded []SyncAction
-	var succeededCount, failed int
+	type poolResult struct {
+		succeeded []SyncAction
+		count     int
+		failed    int
+	}
+	poolCh := make(chan poolResult, 1)
 
+	// The consumer starts before any producer: the sweep can emit more actions
+	// than the channel buffer holds, and nothing else is reading yet, so without
+	// a live reader the sweep would block until the run's deadline.
 	if e.pair.DryRun {
-		for a := range actions {
-			slog.Info("dry-run", "action", a.Type, "key", a.Key)
-			succeeded = append(succeeded, a)
-			succeededCount++
-		}
+		go func() {
+			var done []SyncAction
+			for a := range actions {
+				slog.Info("dry-run", "action", a.Type, "key", a.Key)
+				done = append(done, a)
+			}
+			poolCh <- poolResult{succeeded: done, count: len(done)}
+		}()
 	} else {
-		type poolResult struct {
-			succeeded []SyncAction
-			count     int
-			failed    int
-		}
-		poolCh := make(chan poolResult, 1)
 		go func() {
 			s, c, f := e.pool.Run(ctx, actions)
-			poolCh <- poolResult{s, c, f}
+			poolCh <- poolResult{succeeded: s, count: c, failed: f}
 		}()
-		r := <-poolCh
-		succeeded, succeededCount, failed = r.succeeded, r.count, r.failed
+	}
 
+	r := <-poolCh
+	succeeded, succeededCount, failed := r.succeeded, r.count, r.failed
+
+	if !e.pair.DryRun {
 		e.mu.Lock()
 		e.lastSucceeded = succeededCount
 		e.lastFailed = failed
@@ -195,11 +408,12 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	diffErr := <-diffErrCh
 	slog.Info("diff completed", "pair", e.pair.Name, "err", diffErr)
 	closeCur()
-	if diffErr != nil {
-		e.setResult("error", fmt.Sprintf("diff: %v", diffErr))
-		return fmt.Errorf("diff: %w", diffErr)
-	}
 
+	// Record what was actually copied BEFORE acting on a diff error. A listing
+	// that ran out of budget still let the workers finish every action it had
+	// already emitted, so those bytes are on the target; discarding the cache
+	// write would re-copy all of them next run and, on a bucket too large to
+	// list inside the budget, re-copy them forever without ever converging.
 	now := time.Now().UTC()
 	cached := make([]*cache.CachedObject, 0, len(succeeded))
 	for _, a := range succeeded {
@@ -207,16 +421,25 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 			PairID: e.pair.ID, Key: a.Key,
 			ETag: a.ETag, Size: a.Size,
 			LastModified: a.LastModified, SyncedAt: now,
+			AttrsHash: a.AttrsHash, PendingAttrs: a.PendingAttrs,
 		})
 	}
-	if err := e.store.PutMany(cached); err != nil {
-		slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
+	// A dry run must not cache what it did not copy. Cached, the next real run's
+	// differ would see matching ETags and skip those objects, so the bytes would
+	// never arrive and nothing would ever retry them.
+	if !e.pair.DryRun && len(cached) > 0 {
+		if err := e.store.PutMany(cached); err != nil {
+			slog.Warn("cache put failed", "pair", e.pair.Name, "error", err)
+		}
+	}
+
+	if diffErr != nil {
+		e.setResult("error", fmt.Sprintf("diff: %v", diffErr))
+		return fmt.Errorf("diff: %w", diffErr)
 	}
 
 	totalActions := succeededCount + failed
-	e.mu.Lock()
-	e.progress.Total = totalActions
-	e.mu.Unlock()
+	e.progress.SetTotal(totalActions)
 
 	slog.Info("sync complete", "pair", e.pair.Name,
 		"succeeded", succeededCount, "failed", failed)
@@ -229,7 +452,6 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}
 	e.setResult(status, lastErr)
 	e.lastRun = time.Now()
-
 	if e.pair.WebhookURL != "" {
 		go func() {
 			p := WebhookPayload{
@@ -248,6 +470,14 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 			}
 			SendWebhook(e.pair.WebhookURL, e.pair.WebhookEvents, p)
 		}()
+	}
+
+	// The run finished, but not successfully. Returning nil here is what let a
+	// cron-driven `pair sync` exit 0 while objects failed: the status says
+	// "error" but the exit code said success, and only a human reading the
+	// dashboard would ever notice.
+	if failed > 0 {
+		return fmt.Errorf("%w: %d of %d", ErrObjectsFailed, failed, totalActions)
 	}
 
 	return nil
@@ -276,23 +506,51 @@ func (e *Engine) Status() (running bool, lastRun time.Time, status string, lastE
 	defer e.mu.Unlock()
 	p := Progress{}
 	if e.progress != nil {
-		total, completed, failed := e.progress.Snapshot()
-		p.Total = total
-		p.Completed = completed
-		p.Failed = failed
+		total, completed, failed, pending := e.progress.SnapshotFull()
+		p.Total, p.Completed, p.Failed, p.Pending = total, completed, failed, pending
 	}
 	if !e.running && p.Total == 0 && p.Completed == 0 && e.lastResult != nil {
 		p.Total = e.lastResult.Total
 		p.Completed = e.lastResult.Completed
 		p.Failed = e.lastResult.Failed
+		p.Pending = e.lastResult.Pending
 	}
 	return e.running, e.lastRun, e.lastStatus, e.lastError, p
+}
+
+// PendingAttrs reports how many objects in the last run completed with their
+// characteristics only partially applied. It is what the API exposes as
+// attrs_pending.
+func (e *Engine) PendingAttrs() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.progress == nil {
+		return 0
+	}
+	return e.progress.PendingCount()
 }
 
 func (e *Engine) LastResult() (succeeded, failed int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.lastSucceeded, e.lastFailed
+}
+
+// SyncProvisionState copies the provisioning and sweep state the engine holds on
+// its private pair onto dst. The engine never persists anything itself, and the
+// caller that does (RunOneShot, afterSync) re-reads a fresh pair from the
+// repository, so without this the provisioned_at / provision_error /
+// last_reconcile_at columns are never written.
+func (e *Engine) SyncProvisionState(dst *config.SyncPair) error {
+	if dst == nil {
+		return errors.New("nil pair")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	dst.ProvisionedAt = e.pair.ProvisionedAt
+	dst.ProvisionError = e.pair.ProvisionError
+	dst.LastReconcileAt = e.pair.LastReconcileAt
+	return nil
 }
 
 func ptr[T any](v T) *T {

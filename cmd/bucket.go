@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var bucketCmd = &cobra.Command{Use: "bucket", Short: "Manage bucket configurations"}
+var bucketCmd = groupCommand("bucket", "Manage bucket configurations")
 
 var bucketAddCmd = &cobra.Command{
 	Use:   "add [name]",

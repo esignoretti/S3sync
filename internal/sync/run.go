@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -43,7 +44,7 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	}
 	defer cacheStore.Close()
 
-	engine := NewEngine(pair, src, tgt, srcS3, tgtS3, cacheStore)
+	engine := NewEngine(pair, src, tgt, srcS3, tgtS3, cacheStore, repo.GetSettingsOrDefaults)
 	start := time.Now()
 
 	// Progress display goroutine
@@ -67,6 +68,13 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	if err := engine.RunOnce(ctx); err != nil {
 		close(done)
 		<-progDone
+		// The engine has already decided a terminal status (expired, or error from
+		// a failed preflight). Persisting it here matters more on the error path
+		// than the success path: the pair list and the dashboard read the stored
+		// status, so returning without writing leaves a dead pair looking healthy
+		// until the next successful run — which for an expired pair never comes.
+		persistStatus(repo, pair, engine)
+		persistLog(repo, pair, engine, start, err)
 		fmt.Fprintf(os.Stderr, "\nSync FAILED: %v\n", err)
 		return fmt.Errorf("sync: %w", err)
 	}
@@ -76,6 +84,18 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 
 	_, _, status, _, prog := engine.Status()
 	fmt.Fprintf(os.Stderr, "\r  objects: %d copied, %d failed  \n", prog.Completed, prog.Failed)
+	persistStatus(repo, pair, engine)
+	persistLog(repo, pair, engine, start, nil)
+
+	fmt.Printf("Sync complete for %q. Status: %s (duration: %s)\n", pair.Name, status, time.Since(start).Round(time.Second))
+	return nil
+}
+
+// persistStatus writes the engine's current status onto the pair. Failures are
+// logged rather than returned: the caller is already reporting the run's own
+// outcome, and losing the status write must not mask it.
+func persistStatus(repo *config.Repository, pair *config.SyncPair, engine *Engine) {
+	_, _, status, _, _ := engine.Status()
 	now := time.Now().UTC()
 	pair.LastSyncAt = &now
 	pair.LastSyncStatus = status
@@ -84,10 +104,76 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	} else {
 		pair.ConsecutiveErrors = 0
 	}
+	// Provisioning and the drift sweep both write to the engine's own copy of the
+	// pair, so their outcomes only reach the database through here. Without this
+	// the columns exist and never fill in: last_reconcile_at would be nil on every
+	// start (re-sweeping the whole cache each time) and provision_error could
+	// never hold a value at all.
+	if err := engine.SyncProvisionState(pair); err != nil {
+		slog.Warn("read engine provision state", "pair", pair.Name, "error", err)
+	}
 	if err := repo.UpdateSyncPair(pair); err != nil {
-		return fmt.Errorf("update pair status: %w", err)
+		slog.Warn("failed to persist pair status", "pair", pair.Name, "error", err)
+	}
+}
+
+// persistLog records the run in sync_logs, which is what the dashboard's history
+// view and the API's /logs endpoint read.
+//
+// Only the API path wrote these rows (internal/api/router.go's afterSync), so a
+// pair driven by `pair sync` from cron had no history at all: the dashboard
+// showed an empty log for a pair that was syncing every few minutes. Failures are
+// logged, not returned — the run's own outcome is already being reported.
+func persistLog(repo *config.Repository, pair *config.SyncPair, engine *Engine, startedAt time.Time, runErr error) {
+	_, _, status, lastError, _ := engine.Status()
+	succeeded, failed := engine.LastResult()
+	errMsg := lastError
+	if runErr != nil {
+		errMsg = runErr.Error()
+	}
+	if err := repo.CreateSyncLog(&config.SyncLogEntry{
+		PairID:      pair.ID,
+		Status:      status,
+		ErrorMsg:    errMsg,
+		Succeeded:   succeeded,
+		Failed:      failed,
+		StartedAt:   startedAt,
+		CompletedAt: time.Now().UTC(),
+	}); err != nil {
+		slog.Warn("failed to write sync log", "pair", pair.Name, "error", err)
+	}
+}
+
+// ProvisionPair runs the target-bucket preflight for a pair that is about to be
+// created or changed, outside any sync run.
+//
+// Pair creation calls it before writing the pair: a pair whose target cannot be
+// provisioned would otherwise be persisted and then fail every object on every
+// cycle, with the real cause buried in per-object errors.
+func ProvisionPair(ctx context.Context, repo *config.Repository, pair *config.SyncPair, opts ProvisionOptions) error {
+	tgt, err := repo.GetBucket(pair.TargetBucketID)
+	if err != nil {
+		return fmt.Errorf("get target bucket: %w", err)
+	}
+	src, err := repo.GetBucket(pair.SourceBucketID)
+	if err != nil {
+		return fmt.Errorf("get source bucket: %w", err)
 	}
 
-	fmt.Printf("Sync complete for %q. Status: %s (duration: %s)\n", pair.Name, status, time.Since(start).Round(time.Second))
+	tgtS3, err := s3client.NewClient(tgt)
+	if err != nil {
+		return fmt.Errorf("s3 target client: %w", err)
+	}
+
+	if opts.Now.IsZero() {
+		opts.Now = time.Now().UTC()
+	}
+	if err := ProvisionTarget(ctx, tgtS3, src.Region, tgt, pair, opts); err != nil {
+		pair.ProvisionError = err.Error()
+		return err
+	}
+	now := opts.Now.UTC()
+	pair.ProvisionedAt = &now
+	pair.ProvisionError = ""
 	return nil
 }

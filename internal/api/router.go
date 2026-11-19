@@ -121,7 +121,7 @@ func (s *Server) createEngine(pairID string) (*sync.Engine, error) {
 		return nil, fmt.Errorf("create s3 client for target: %w", err)
 	}
 
-	engine := sync.NewEngine(pair, src, tgt, srcS3, tgtS3, s.cache)
+	engine := sync.NewEngine(pair, src, tgt, srcS3, tgtS3, s.cache, s.repo.GetSettingsOrDefaults)
 	s.SetEngine(pairID, engine)
 	return engine, nil
 }
@@ -157,6 +157,11 @@ func (s *Server) afterSync(pairID string, startedAt time.Time, syncErr error) {
 		} else {
 			pair.ConsecutiveErrors = 0
 		}
+		// The engine keeps its own copy of the pair; provisioning and the drift
+		// sweep record their outcomes there, so a plain re-read would drop them.
+		if err := eng.SyncProvisionState(pair); err != nil {
+			slog.Warn("afterSync: read engine provision state", "pair", pairID, "error", err)
+		}
 		s.repo.UpdateSyncPair(pair)
 
 		errMsg := lastError
@@ -182,6 +187,11 @@ func (s *Server) StartEngineLoop(ctx context.Context, p config.SyncPair) error {
 	if s.HasEngine(p.ID) {
 		slog.Debug("engine loop already running", "pair", p.Name)
 		return nil
+	}
+	if ctx == nil {
+		// A server built without SetRootContext (tests, embedding) would otherwise
+		// hand a nil parent to the engine and panic inside context.WithTimeout.
+		ctx = context.Background()
 	}
 
 	engine, err := s.createEngine(p.ID)
@@ -296,6 +306,8 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/sync-pairs/:id/history", s.serveHistory)
 
 		api.GET("/health", s.health)
+		api.GET("/settings", s.getSettings)
+		api.PUT("/settings", s.updateSettings)
 		api.GET("/version", s.version)
 
 		// Setup wizard

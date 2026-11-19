@@ -15,6 +15,9 @@ type ActionType int
 const (
 	ActionCopy ActionType = iota
 	ActionDelete
+	// ActionCopyAttributes retries only the characteristics of an object whose
+	// bytes already match. Appended last so the existing values never shift.
+	ActionCopyAttributes
 )
 
 type SyncAction struct {
@@ -23,6 +26,13 @@ type SyncAction struct {
 	ETag         string
 	Size         int64
 	LastModified time.Time
+	// AttrsHash is the fingerprint of the characteristics applied to the copy.
+	// Empty means unknown (attribute replication off, or a partial application),
+	// never that the target matches the source.
+	AttrsHash string
+	// PendingAttrs reports that the bytes were copied but the characteristics
+	// were not fully applied, so the next cycle retries them without re-copying.
+	PendingAttrs bool
 }
 
 const maxS3Keys = 1000
@@ -100,24 +110,43 @@ func StreamingDiff(
 	var pageIdx int
 	var pageLast bool
 	var listDone bool
+	// A failed page fetch is NOT the end of the bucket. Recording it here and
+	// stopping the merge join is what keeps the differ from concluding that
+	// every remaining cached object is absent from the source: with delete
+	// propagation on, that conclusion deletes live target data because one
+	// listing call timed out.
+	var listErr error
 
 	nextListObj := func() (*s3types.Object, bool) {
-		if listDone {
+		if listDone || listErr != nil {
 			return nil, false
 		}
 		for pageIdx >= len(currentPage) {
 			select {
 			case p, ok := <-pages:
 				if !ok {
+					// The fetcher closes `pages` on its way out, error or not,
+					// so a closed channel alone does not mean the listing
+					// finished. Check for a recorded error before concluding
+					// the bucket ended.
+					select {
+					case err := <-errCh:
+						listErr = err
+					default:
+					}
 					listDone = true
 					return nil, false
 				}
 				currentPage = p.objs
 				pageIdx = 0
 				pageLast = p.last
-			case <-errCh:
+			case err := <-errCh:
+				listErr = err
+				listDone = true
 				return nil, false
 			case <-ctx.Done():
+				listErr = ctx.Err()
+				listDone = true
 				return nil, false
 			}
 		}
@@ -136,6 +165,9 @@ func StreamingDiff(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if listErr != nil {
+			return listErr
+		}
 
 		if listHasMore && (!cacheHasMore || keyLt(aws.ToString(listObj.Key), cacheCur.Key())) {
 			actions <- SyncAction{
@@ -151,11 +183,24 @@ func StreamingDiff(
 			cacheHasMore = cacheCur.Next()
 		} else {
 			co := cacheCur.Object()
-			if co.ETag != aws.ToString(listObj.ETag) || !co.LastModified.Equal(aws.ToTime(listObj.LastModified)) {
+			etag := aws.ToString(listObj.ETag)
+			lastModified := aws.ToTime(listObj.LastModified)
+			switch {
+			case co.ETag != etag || !co.LastModified.Equal(lastModified):
 				actions <- SyncAction{
 					Type: ActionCopy, Key: aws.ToString(listObj.Key),
-					ETag: aws.ToString(listObj.ETag), Size: aws.ToInt64(listObj.Size),
-					LastModified: aws.ToTime(listObj.LastModified),
+					ETag: etag, Size: aws.ToInt64(listObj.Size),
+					LastModified: lastModified,
+				}
+			case co.PendingAttrs:
+				// The bytes match, so no copy will run and nothing would carry
+				// the characteristics: retry them on their own. This is the only
+				// way a tag or metadata change gets applied, because neither
+				// bumps the ETag or LastModified the differ compares.
+				actions <- SyncAction{
+					Type: ActionCopyAttributes, Key: aws.ToString(listObj.Key),
+					ETag: etag, Size: aws.ToInt64(listObj.Size),
+					LastModified: lastModified,
 				}
 			}
 			listObj, listHasMore = nextListObj()
@@ -163,7 +208,7 @@ func StreamingDiff(
 		}
 	}
 
-	return nil
+	return listErr
 }
 
 func keyLt(a, b string) bool {

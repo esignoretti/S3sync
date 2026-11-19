@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 )
 
 type SetupStep int
@@ -34,6 +35,18 @@ type SetupState struct {
 	SyncPair     *SyncPair
 	Step         SetupStep
 	Error        string
+
+	// Provision, when set, is called with the assembled pair after the user
+	// confirms the sync-pair step and before the pair is persisted. Returning
+	// an error aborts the step and nothing is written. It is a hook rather
+	// than a direct call because validation and provisioning live in
+	// internal/sync, which imports this package.
+	Provision func(pair *SyncPair) error
+
+	// RecreateConfirm is the text the operator typed to authorise destroying
+	// an existing target bucket. It is forwarded to Provision, which compares
+	// it against the bucket name; a recreate without an exact match is refused.
+	RecreateConfirm string
 }
 
 func NewSetupState() *SetupState {
@@ -41,9 +54,9 @@ func NewSetupState() *SetupState {
 }
 
 type SetupInput struct {
-	Step        SetupStep `json:"step"`
-	Cancel      bool      `json:"cancel,omitempty"`
-	Back        bool      `json:"back,omitempty"`
+	Step   SetupStep `json:"step"`
+	Cancel bool      `json:"cancel,omitempty"`
+	Back   bool      `json:"back,omitempty"`
 
 	// Bucket fields
 	Name          string `json:"name,omitempty"`
@@ -66,6 +79,24 @@ type SetupInput struct {
 	DeletePropagation  *bool  `json:"delete_propagation,omitempty"`
 	TargetStorageClass string `json:"target_storage_class,omitempty"`
 	PairName           string `json:"pair_name,omitempty"`
+
+	// Attribute replication and lock provisioning fields. These mirror the
+	// pair flags so the web wizard cannot silently drop them: a field the
+	// form posts but SetupInput does not declare is discarded by
+	// ShouldBindJSON, and the pair is then created with the zero value.
+	ReplicateAttributes     bool   `json:"replicate_attributes,omitempty"`
+	TargetExpireAt          string `json:"target_expire_at,omitempty"`
+	NoncurrentExpireDays    int    `json:"noncurrent_expire_days,omitempty"`
+	NewerNoncurrentVersions int    `json:"newer_noncurrent_versions,omitempty"`
+	RequireObjectLock       bool   `json:"require_object_lock,omitempty"`
+	OnLockMissing           string `json:"on_lock_missing,omitempty"`
+	AcceptCompliance        bool   `json:"accept_compliance,omitempty"`
+	AttrsReconcileInterval  int    `json:"attrs_reconcile_interval,omitempty"`
+	// RecreateConfirm must equal the target bucket's name before a
+	// lock-missing recreate is allowed to destroy it. It is checked
+	// server-side because the wizard resets its form between steps and so
+	// cannot reliably compare against the name itself.
+	RecreateConfirm string `json:"recreate_confirm,omitempty"`
 }
 
 func (in *SetupInput) ToBucket() *Bucket {
@@ -96,6 +127,23 @@ func (in *SetupInput) ToSyncPair(srcName, tgtName string) *SyncPair {
 		MaxGetOpsPerMinute: in.MaxGetOpsPerMinute,
 		TargetStorageClass: in.TargetStorageClass,
 		Enabled:            true,
+
+		ReplicateAttributes:     in.ReplicateAttributes,
+		NoncurrentExpireDays:    in.NoncurrentExpireDays,
+		NewerNoncurrentVersions: in.NewerNoncurrentVersions,
+		RequireObjectLock:       in.RequireObjectLock,
+		OnLockMissing:           in.OnLockMissing,
+		AttrsReconcileInterval:  in.AttrsReconcileInterval,
+	}
+	if p.OnLockMissing == "" {
+		p.OnLockMissing = "fail"
+	}
+	// A malformed date is left as nil here and rejected by the caller's
+	// ValidatePairOptions pass, which quotes the offending value.
+	if in.TargetExpireAt != "" {
+		if t, err := time.Parse("2006-01-02", in.TargetExpireAt); err == nil {
+			p.TargetExpireAt = &t
+		}
 	}
 	if in.DeletePropagation != nil {
 		p.DeletePropagation = *in.DeletePropagation
@@ -154,6 +202,16 @@ func (s *SetupState) Apply(repo *Repository, in *SetupInput) error {
 			return fmt.Errorf("sync pair: %w", err)
 		}
 		p := in.ToSyncPair(s.SourceBucket.Name, s.TargetBucket.Name)
+		s.RecreateConfirm = in.RecreateConfirm
+		// Provision runs before the pair is persisted: a pair whose target
+		// cannot be prepared would otherwise be stored and then fail every
+		// object on every cycle. config cannot import internal/sync, so the
+		// preflight is injected by the caller.
+		if s.Provision != nil {
+			if err := s.Provision(p); err != nil {
+				return fmt.Errorf("sync pair: %w", err)
+			}
+		}
 		if err := repo.CreateSyncPair(p); err != nil {
 			return fmt.Errorf("create sync pair: %w", err)
 		}
