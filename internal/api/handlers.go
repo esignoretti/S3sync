@@ -13,6 +13,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// Version is the application version reported by GET /api/version.
+//
+// It lives here as a named constant so a release is a one-line change rather
+// than a string literal buried in a handler.
+const Version = "0.3.0"
+
 type apiResponse struct {
 	Data  interface{} `json:"data,omitempty"`
 	Error string      `json:"error,omitempty"`
@@ -636,7 +642,7 @@ func (s *Server) health(c *gin.Context) {
 }
 
 func (s *Server) version(c *gin.Context) {
-	respond(c, http.StatusOK, gin.H{"version": "0.2.0"})
+	respond(c, http.StatusOK, gin.H{"version": Version})
 }
 
 // getSettings reports the global settings. The run timeout is read at the start

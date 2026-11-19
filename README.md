@@ -1,5 +1,7 @@
 # S3sync
 
+**Version 0.3.0**
+
 One-way S3-compatible bucket sync. CLI, REST API, and embedded web UI. Configurable parallelism, token-bucket throttling, object lock support, optional replication of object characteristics, and target expiry dates.
 
 Optimized for **Cubbit DS3** but works with any S3-compatible endpoint (AWS, MinIO, etc.).

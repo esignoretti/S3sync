@@ -54,6 +54,45 @@ func TestAPIHealth(t *testing.T) {
 	}
 }
 
+// TestAPIVersion pins the reported version so a release bump is verified rather
+// than assumed. It asserts the value equals the api package constant, so the
+// two can never drift; bumping the constant is the only edit a release needs.
+func TestAPIVersion(t *testing.T) {
+	db, err := config.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	srv, err := api.NewServer(config.NewRepository(db), filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := srv.Router()
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/version", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Data struct {
+			Version string `json:"version"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Data.Version != api.Version {
+		t.Fatalf("reported version %q, want %q", resp.Data.Version, api.Version)
+	}
+	if resp.Data.Version == "" {
+		t.Fatal("the version endpoint reported an empty version")
+	}
+}
+
 func TestAPIBucketCRUD(t *testing.T) {
 	db, err := config.Open(":memory:")
 	if err != nil {
