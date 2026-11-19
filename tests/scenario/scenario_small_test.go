@@ -17,13 +17,24 @@ func TestScenarioEmptySource(t *testing.T) {
 	e.assertTargetCount(0)
 }
 
+// TestScenarioTiny covers the two sizes a differ gets wrong. The keys must carry
+// the "tiny" shape: sizeFor matches on "-<shape>." and falls back to "small"
+// (1-64 KiB), so keys named "obj/zero.bin" would silently seed kilobyte objects
+// and prove nothing about the 0- and 1-byte cases.
 func TestScenarioTiny(t *testing.T) {
 	e := newScenarioEnv(t, envOptions{})
-	e.seed([]string{"obj/zero.bin", "obj/one.bin"})
+	// The tiny shape is deterministic at 0 bytes, so the empty case is always the
+	// empty case; the 1-byte neighbour is seeded explicitly.
+	zero, one := synthKey(0, "tiny"), "obj/one-byte.bin"
+	if got := e.sizeFor(zero); got != 0 {
+		t.Fatalf("the zero-byte fixture is %d bytes, want 0", got)
+	}
+	e.seed([]string{zero})
+	e.seedLiteral(one, "x")
 	e.sync()
 	e.assertTargetCount(2)
-	e.assertBytesMatch("obj/zero.bin")
-	e.assertBytesMatch("obj/one.bin")
+	e.assertBytesMatch(zero)
+	e.assertBytesMatch(one)
 }
 
 func TestScenarioSingleObject(t *testing.T) {
@@ -77,11 +88,13 @@ func TestScenarioSourceChanges(t *testing.T) {
 	e.sync()
 	for _, k := range keys[:10] {
 		putBody(t, e.Client, e.Source, k, "changed")
-		e.literalDigest[k] = digestOf("changed")
+		e.setLiteral(k, "changed")
 	}
 	e.Counter.Reset()
 	e.sync()
-	if got := e.Counter.Count(kindCopyObject); got != 10 {
+	// A lower bound, not equality: the transport counts ATTEMPTS, and the SDK
+	// retries a copy whose response was lost, so a correct run can count 11.
+	if got := e.Counter.Count(kindCopyObject); got < 10 {
 		t.Fatalf("copied %d objects after changing 10, want 10 (%s)", got, e.Counter.Summary())
 	}
 }
@@ -119,7 +132,7 @@ func TestScenarioSourceDeletesThenRestores(t *testing.T) {
 	e := newScenarioEnv(t, envOptions{Versioning: true})
 	e.Pair.DeletePropagation = true
 	putBody(t, e.Client, e.Source, "flip.txt", "stable-body")
-	e.literalDigest["flip.txt"] = digestOf("stable-body")
+	e.setLiteral("flip.txt", "stable-body")
 	e.sync()
 	if keys := e.targetKeys(); len(keys) != 1 {
 		t.Fatalf("target after first sync = %v, want [flip.txt]", keys)

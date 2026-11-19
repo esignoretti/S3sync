@@ -399,7 +399,20 @@ type scenarioEnv struct {
 	tgtClient *s3.Client
 
 	literalDigest map[string][32]byte
-	largeSeed     map[string]string
+	// literalSize records the byte length of a literal body, because a literal
+	// digest cannot say how long the object was: the source-side size check in
+	// assertBytesMatch needs it explicitly.
+	literalSize map[string]int64
+	// seedSize records how many bytes each seeded key actually received. It is
+	// the source of truth for assertBytesMatch's length expectation: deriving it
+	// from the key (a shape range, or worse the target's own length) cannot tell
+	// a complete copy from a truncated one.
+	seedMu    sync.Mutex
+	seedSize  map[string]int64
+	largeSeed map[string]string
+	// composedSize records the byte length requested for a composed object, so
+	// the range assertions can check the target's length rather than trust it.
+	composedSize map[string]int64
 
 	bgDone chan struct{}
 	bgErr  error
@@ -508,6 +521,9 @@ func newScenarioEnvWithBuckets(t *testing.T, client *s3.Client, src, tgt string,
 			RetentionMode: o.RetentionMode,
 		},
 		literalDigest: map[string][32]byte{},
+		literalSize:   map[string]int64{},
+		seedSize:      map[string]int64{},
+		composedSize:  map[string]int64{},
 		largeSeed:     map[string]string{},
 	}
 
@@ -591,9 +607,20 @@ func (e *scenarioEnv) assertNoWorkOnSecondSync() {
 	e.T.Helper()
 	e.Counter.Reset()
 	e.sync()
-	copies := e.Counter.Count(kindCopyObject) + e.Counter.Count(kindUploadPartCopy) + e.Counter.Count(kindPutObject)
-	if copies != 0 {
-		e.T.Fatalf("second sync copied %d objects, want 0 (%s)", copies, e.Counter.Summary())
+	// Every kind that means "work was performed", not just the byte writes.
+	// Counting only copies let a second sync re-issue a tag read and a tag write
+	// for every object — the stale-fingerprint class this suite exists to catch,
+	// and ~1.5s per object here — and still pass.
+	var work int
+	for _, kind := range []string{
+		kindCopyObject, kindUploadPartCopy, kindPutObject,
+		kindPutTagging, kindGetTagging,
+		kindCreateMPU, kindCompleteMPU,
+	} {
+		work += e.Counter.Count(kind)
+	}
+	if work != 0 {
+		e.T.Fatalf("second sync performed %d operations, want 0 (%s)", work, e.Counter.Summary())
 	}
 }
 
@@ -630,29 +657,57 @@ func (e *scenarioEnv) assertBytesMatch(key string) {
 	if err != nil {
 		e.T.Fatalf("head target %q: %v", key, err)
 	}
-	size := aws.ToInt64(head.ContentLength)
+	gotSize := aws.ToInt64(head.ContentLength)
+
+	// The expected SIZE comes from the source, never from the target.
+	//
+	// Deriving it from the target made this assertion unable to see a truncated
+	// copy: the synthetic stream is defined by (key, size), so a target holding
+	// a PREFIX of the source is exactly what the expectation described. A copy
+	// that wrote nothing gives size=0, digest=sha256("") and an expected
+	// sha256(""), which passes.
+	e.seedMu.Lock()
+	wantSize, recorded := e.seedSize[key]
+	e.seedMu.Unlock()
+	if !recorded {
+		wantSize = e.sizeFor(key)
+	}
+	if _, literal := e.literalDigest[key]; literal {
+		wantSize = e.literalSize[key]
+	}
+	if gotSize != wantSize {
+		e.T.Fatalf("target %q is %d bytes, want %d", key, gotSize, wantSize)
+	}
 
 	got, err := digestOfObject(ctx, e.Client, e.Target, key)
 	if err != nil {
 		e.T.Fatalf("digest target %q: %v", key, err)
 	}
-	want, ok := e.literalDigest[key]
-	if !ok {
-		want = synthChecksum(key, size)
+	if want := e.expectedDigest(key, wantSize); got != want {
+		e.T.Fatalf("target %q has digest %x, want %x (size %d)", key, got, want, wantSize)
 	}
-	if got != want {
-		e.T.Fatalf("target %q has digest %x, want %x (size %d)", key, got, want, size)
+}
+
+// expectedDigest is the digest the target must have, given the size the SOURCE
+// had. It is a method rather than an inline expression so a unit test can pin
+// that a truncated target's digest does NOT satisfy it.
+func (e *scenarioEnv) expectedDigest(key string, wantSize int64) [32]byte {
+	if want, ok := e.literalDigest[key]; ok {
+		return want
 	}
+	return synthChecksum(key, wantSize)
 }
 
 // objectFacts is every replicated characteristic of one object.
 type objectFacts struct {
-	ContentType   string
-	Metadata      map[string]string
-	Tags          map[string]string
-	RetentionMode string
-	RetainUntil   *time.Time
-	LegalHold     string
+	ContentType     string
+	ContentLanguage string
+	Expires         *time.Time
+	Metadata        map[string]string
+	Tags            map[string]string
+	RetentionMode   string
+	RetainUntil     *time.Time
+	LegalHold       string
 }
 
 // fetchFacts reads one object's characteristics. Tags need a separate call
@@ -667,11 +722,13 @@ func fetchFacts(t *testing.T, client *s3.Client, bucket, key string) objectFacts
 		t.Fatalf("head %q in %q: %v", key, bucket, err)
 	}
 	f := objectFacts{
-		ContentType:   aws.ToString(head.ContentType),
-		Metadata:      head.Metadata,
-		RetentionMode: string(head.ObjectLockMode),
-		RetainUntil:   head.ObjectLockRetainUntilDate,
-		LegalHold:     string(head.ObjectLockLegalHoldStatus),
+		ContentType:     aws.ToString(head.ContentType),
+		ContentLanguage: aws.ToString(head.ContentLanguage),
+		Expires:         head.Expires,
+		Metadata:        head.Metadata,
+		RetentionMode:   string(head.ObjectLockMode),
+		RetainUntil:     head.ObjectLockRetainUntilDate,
+		LegalHold:       string(head.ObjectLockLegalHoldStatus),
 	}
 	tags, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 		Bucket: aws.String(bucket), Key: aws.String(key),
@@ -788,7 +845,26 @@ func (e *scenarioEnv) seedOneErr(key string) error {
 	if err != nil {
 		return fmt.Errorf("seed %q (%d bytes): %w", key, size, err)
 	}
+	e.seedMu.Lock()
+	e.seedSize[key] = size
+	e.seedMu.Unlock()
 	return nil
+}
+
+// setLiteral records the digest AND the length of a literal body, so
+// assertBytesMatch can compare the target's size against the source's rather
+// than against the target's own length.
+func (e *scenarioEnv) setLiteral(key, body string) {
+	e.literalDigest[key] = digestOf(body)
+	e.literalSize[key] = int64(len(body))
+}
+
+// seedLiteral writes a key with an exact, caller-chosen body and records both its
+// digest and its length, for the boundary cases a shape cannot express.
+func (e *scenarioEnv) seedLiteral(key, body string) {
+	e.T.Helper()
+	putBody(e.T, e.Client, e.Source, key, body)
+	e.setLiteral(key, body)
 }
 
 // sizeFor derives an object's size from its key's shape suffix, defaulting to

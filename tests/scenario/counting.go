@@ -21,6 +21,7 @@ const (
 	kindGetTagging     = "get_tagging"
 	kindCreateMPU      = "create_multipart_upload"
 	kindCompleteMPU    = "complete_multipart_upload"
+	kindDeleteObject   = "delete_object"
 	kindOther          = "other"
 )
 
@@ -48,6 +49,12 @@ func newCountingTransport(base http.RoundTripper) *countingTransport {
 // endpoint (a client-side rejection) is not counted as work performed.
 func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := c.base.RoundTrip(r)
+	if err != nil {
+		// A request that never reached the endpoint performed no work. Counting
+		// it turned a transport failure into "second sync copied 1 objects",
+		// which hides the real cause behind a misleading message.
+		return resp, err
+	}
 	kind := classify(r)
 	c.mu.Lock()
 	c.counts[kind]++
@@ -85,8 +92,16 @@ func classify(r *http.Request) string {
 		return kindCreateMPU
 	case r.Method == http.MethodPost && q.Has("uploadId"):
 		return kindCompleteMPU
-	case isPut && hasKey && !q.Has("uploadId"):
+	case isPut && hasKey:
+		// A plain UploadPart (partNumber + uploadId, no copy header) is a data
+		// write too: production only issues UploadPartCopy today, but if an
+		// upload path is ever added an uncounted one would keep the idempotence
+		// assertions green.
 		return kindPutObject
+	case r.Method == http.MethodDelete && hasKey:
+		return kindDeleteObject
+	case r.Method == http.MethodPost && q.Has("delete"):
+		return kindDeleteObject
 	default:
 		return kindOther
 	}

@@ -15,7 +15,7 @@ func TestScenarioVersionedSource(t *testing.T) {
 	e := newScenarioEnv(t, envOptions{Versioning: true})
 	putBody(t, e.Client, e.Source, "doc.txt", "v1")
 	putBody(t, e.Client, e.Source, "doc.txt", "v2")
-	e.literalDigest["doc.txt"] = digestOf("v2")
+	e.setLiteral("doc.txt", "v2")
 	e.sync()
 	e.assertTargetCount(1)
 	e.assertBytesMatch("doc.txt") // the current version only
@@ -26,7 +26,7 @@ func TestScenarioVersionedTarget(t *testing.T) {
 	putBody(t, e.Client, e.Source, "doc.txt", "v1")
 	e.sync()
 	putBody(t, e.Client, e.Source, "doc.txt", "v2")
-	e.literalDigest["doc.txt"] = digestOf("v2")
+	e.setLiteral("doc.txt", "v2")
 	e.sync()
 	vs, err := e.Client.ListObjectVersions(context.Background(), &s3.ListObjectVersionsInput{
 		Bucket: aws.String(e.Target), Prefix: aws.String("doc.txt"),

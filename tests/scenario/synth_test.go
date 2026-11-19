@@ -4,6 +4,7 @@ package scenario
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -189,5 +190,44 @@ func TestCountingTransportIgnoresBucketOperations(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPut, "https://h/bucket/obj/key.bin", nil)
 	if got := classify(req); got != kindPutObject {
 		t.Fatalf("object PUT classified as %q, want %q", got, kindPutObject)
+	}
+}
+
+// TestCountingTransportIgnoresFailedRequests pins that a request which never
+// reached the endpoint is not counted as work: counting it turned a transport
+// failure into "second sync copied 1 objects", hiding the real cause.
+func TestCountingTransportIgnoresFailedRequests(t *testing.T) {
+	failing := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("connection reset")
+	})
+	c := newCountingTransport(failing)
+	req, err := http.NewRequest(http.MethodPut, "https://h/b/k", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if _, err := c.RoundTrip(req); err == nil {
+		t.Fatal("the fake transport was supposed to fail")
+	}
+	if got := c.Total(); got != 0 {
+		t.Fatalf("a failed request counted as %d operations, want 0", got)
+	}
+}
+
+// TestCountingTransportCountsDeletesAndUploadParts pins the two kinds that were
+// previously invisible: a plain UploadPart (no copy header) and a DELETE.
+func TestCountingTransportCountsDeletesAndUploadParts(t *testing.T) {
+	cases := []struct{ method, url, want string }{
+		{"PUT", "https://h/b/k?partNumber=1&uploadId=x", kindPutObject},
+		{"DELETE", "https://h/b/k", kindDeleteObject},
+		{"DELETE", "https://h/b/k?versionId=abc", kindDeleteObject},
+	}
+	for _, tc := range cases {
+		req, err := http.NewRequest(tc.method, tc.url, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		if got := classify(req); got != tc.want {
+			t.Fatalf("%s %s classified as %q, want %q", tc.method, tc.url, got, tc.want)
+		}
 	}
 }

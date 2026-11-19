@@ -101,9 +101,13 @@ func TestScenarioStorageClassOverride(t *testing.T) {
 }
 
 // TestScenarioUnreplicableFields pins that Content-Language and Expires are
-// deliberately excluded from the fingerprint. This endpoint does not store
-// them, so including them would make source and target differ on every sweep
-// forever.
+// deliberately excluded, by asserting the OUTCOME: this endpoint does not store
+// them at all, so the source loses them too and the target cannot carry them.
+//
+// Asserting only "no drift on the next sweep" would prove nothing: the writer
+// and the sweep both fingerprint the SOURCE head, so the hash agrees whether or
+// not those fields are in it, and the sweep never compares source against
+// target. The drift assertion is kept as a secondary check.
 func TestScenarioUnreplicableFields(t *testing.T) {
 	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 60})
 	putBody(t, e.Client, e.Source, "doc.txt", "body", func(in *s3.PutObjectInput) {
@@ -112,9 +116,26 @@ func TestScenarioUnreplicableFields(t *testing.T) {
 		in.ContentType = aws.String("text/plain")
 	})
 	e.sync()
+
+	tgt := fetchFacts(t, e.Client, e.Target, "doc.txt")
+	if tgt.ContentType != "text/plain" {
+		t.Fatalf("content-type = %q, want text/plain (this field IS stored and must replicate)", tgt.ContentType)
+	}
+	// The point of the scenario: neither side retains what cannot be replicated,
+	// so nothing can diverge over it.
+	src := fetchFacts(t, e.Client, e.Source, "doc.txt")
+	if src.ContentLanguage != "" || tgt.ContentLanguage != "" {
+		t.Fatalf("content-language src=%q tgt=%q; the fixture assumes this endpoint does not store it",
+			src.ContentLanguage, tgt.ContentLanguage)
+	}
+	if src.Expires != nil || tgt.Expires != nil {
+		t.Fatalf("expires src=%v tgt=%v; the fixture assumes this endpoint does not store it",
+			src.Expires, tgt.Expires)
+	}
+
 	e.assertNoWorkOnSecondSync()
 	e.reconcile()
-	e.assertNoWorkOnSecondSync() // perpetual drift would show up here
+	e.assertNoWorkOnSecondSync()
 }
 
 // TestScenarioPendingAttrsRecovery covers the attribute-only retry: when a tag

@@ -120,8 +120,12 @@ type objectShape struct {
 // shapes is the fixture size table. "huge" exists to cross the 5 GiB
 // CopyObject limit so the multipart path is exercised; "large" crosses the
 // multipart part size so a single part is not the whole object.
+// The tiny shape is DETERMINISTIC (0 or 1 byte) rather than a range, because the
+// 0-byte case is the one a differ and a copy both get wrong; a range would make
+// half the runs exercise 1 byte and leave the empty case untested. Use
+// synthKey(0,"tiny") for the empty object and synthKey(1,"tiny") for the 1-byte.
 var shapes = []objectShape{
-	{"tiny", 0, 1},
+	{"tiny", 0, 0},
 	{"small", 1 << 10, 64 << 10},
 	{"medium", 1 << 20, 8 << 20},
 	{"large", 100 << 20, 100 << 20},

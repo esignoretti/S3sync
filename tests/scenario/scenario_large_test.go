@@ -17,9 +17,15 @@ func TestScenarioZeroByteNeverMultipart(t *testing.T) {
 	// object with no parts has nothing to compose, so a multipart attempt would
 	// fail at CompleteMultipartUpload.
 	e := newScenarioEnv(t, envOptions{})
-	e.seed([]string{"obj/zero.bin"})
+	// The key must carry the "tiny" shape, or sizeFor falls back to "small" and
+	// this seeds a kilobyte object instead of an empty one.
+	key := synthKey(0, "tiny")
+	if got := e.sizeFor(key); got != 0 {
+		t.Fatalf("the fixture is %d bytes, want 0", got)
+	}
+	e.seed([]string{key})
 	e.sync()
-	e.assertBytesMatch("obj/zero.bin")
+	e.assertBytesMatch(key)
 	if got := e.Counter.Count(kindCreateMPU); got != 0 {
 		t.Fatalf("a zero-byte object opened %d multipart uploads", got)
 	}
@@ -93,9 +99,15 @@ func TestScenarioLargeSecondSyncIsNoop(t *testing.T) {
 	if tier() != tierAll {
 		t.Skip("6 GiB; tier=all only")
 	}
-	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true})
+	// The interval is REQUIRED: without it ShouldReconcile is false, the sweep
+	// never runs, and this test degrades to a plain differ-level idempotence
+	// check that says nothing about the writer/sweep fingerprint round-trip its
+	// name promises.
+	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true, AttrsReconcileInterval: 60})
 	e.composeLarge("big/attrs.bin", 6<<30, nil)
 	e.sync()
+	e.assertNoWorkOnSecondSync()
+	e.reconcile()
 	e.assertNoWorkOnSecondSync()
 }
 
@@ -108,7 +120,18 @@ func TestScenarioLargeCancelMidCopy(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	e.startSyncInBackground(ctx)
-	time.Sleep(3 * time.Second) // let the multipart upload open
+	// Wait for the upload to actually open rather than sleeping a fixed 3s: on a
+	// slow run the sleep can land before the worker has even HEADed the source,
+	// and then "no uploads remain" passes because nothing ever started.
+	deadline := time.Now().Add(120 * time.Second)
+	for e.Counter.Count(kindCreateMPU) == 0 {
+		if time.Now().After(deadline) {
+			cancel()
+			_ = e.waitForSync()
+			t.Fatal("no multipart upload was opened within 120s, so cancellation aborted nothing")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 	cancel()
 	_ = e.waitForSync() // cancellation is the expected error
 

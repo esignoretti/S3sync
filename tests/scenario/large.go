@@ -176,6 +176,7 @@ func (e *scenarioEnv) composeLarge(key string, size int64, mutate func(*s3.Creat
 	e.T.Helper()
 	composeLarge(e.T, e.Client, e.Source, key, size, mutate)
 	e.largeSeed[key] = seedChunkKey
+	e.composedSize[key] = size
 	// The chunk must not be synced: it is scaffolding, not a fixture.
 	if _, err := e.Client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(e.Source), Key: aws.String(seedChunkKey),
@@ -198,6 +199,15 @@ func (e *scenarioEnv) assertRangeMatches(key string, offsets ...int64) {
 		e.T.Fatalf("head target %q: %v", key, err)
 	}
 	size := aws.ToInt64(head.ContentLength)
+
+	// The target's length must match what was composed. Without this a truncated
+	// object passes every offset assertion inside the truncation, because the
+	// expected bytes are a function of the offset alone.
+	if composed := e.largeSeed[key]; composed != "" {
+		if want := e.composedSize[key]; size != want {
+			e.T.Fatalf("target %q is %d bytes, want %d", key, size, want)
+		}
+	}
 
 	seedKey, composed := e.largeSeed[key]
 	if !composed {
