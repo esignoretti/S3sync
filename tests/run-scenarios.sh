@@ -17,6 +17,15 @@ set -euo pipefail
 ssh_opts=(-o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ConnectTimeout=30)
 
 tier="${1:-full}"
+# go test's own timeout must not fire: it panics and kills the process without
+# running t.Cleanup, so every bucket live at that moment leaks — and on this
+# endpoint a leaked bucket bills forever. The tier decides how long is enough.
+case "$tier" in
+  fast) test_timeout="${SCENARIO_TIMEOUT:-45m}" ;;
+  full) test_timeout="${SCENARIO_TIMEOUT:-90m}" ;;
+  all)  test_timeout="${SCENARIO_TIMEOUT:-4h}" ;;
+  *)    test_timeout="${SCENARIO_TIMEOUT:-90m}" ;;
+esac
 host="${2:-${SCENARIO_HOST:-}}"
 
 if [[ -z "$host" ]]; then
@@ -46,12 +55,12 @@ echo "==> shipping to $host"
 ssh "${ssh_opts[@]}" "$host" "rm -f /root/scenario-linux /root/s3sync-linux"
 scp -q "${ssh_opts[@]}" "$test_bin" "$cli_bin" "$host":/root/
 
-echo "==> running tier=$tier on $host (log: $log)"
+echo "==> running tier=$tier on $host, timeout $test_timeout (log: $log)"
 ssh "${ssh_opts[@]}" "$host" \
   "SCENARIO_TIER='$tier' SCENARIO_CLI_BIN=/root/s3sync-linux \
    S3_TEST_ENDPOINT='$S3_TEST_ENDPOINT' \
    S3_TEST_ACCESS_KEY='$S3_TEST_ACCESS_KEY' \
    S3_TEST_SECRET_KEY='$S3_TEST_SECRET_KEY' \
-   /root/scenario-linux -test.v -test.timeout 60m" | tee "$log"
+   /root/scenario-linux -test.v -test.timeout '$test_timeout'" | tee "$log"
 
 echo "==> done; log at $log"

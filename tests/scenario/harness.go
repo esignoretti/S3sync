@@ -1061,8 +1061,11 @@ func (e *scenarioEnv) syncOutcome() syncOutcome {
 	var buf strings.Builder
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	// Deferred, not sequential: slog's default is process-global, and a t.Fatalf
+	// inside this window (the caller may assert on the log before we return)
+	// would otherwise leave every later test logging into this buffer.
+	defer slog.SetDefault(prev)
 	err := eng.RunOnce(context.Background())
-	slog.SetDefault(prev)
 
 	_, _, status, lastErr, _ := eng.Status()
 	succeeded, failed := eng.LastResult()

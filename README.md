@@ -396,8 +396,12 @@ Three tiers, selected with `SCENARIO_TIER`:
 | Tier | Adds | Time |
 | --- | --- | --- |
 | `fast` | Every behaviour that needs no large object and no bulk seeding | ~20 min (measured) |
-| `full` | 1,200-object listing scenario, 5 GiB object either side of the single-copy limit | ~25 min (measured) |
-| `all` | 6 GiB multipart objects, 500 locked objects | ~2 h (estimate) |
+| `full` | 1,200-object listing scenario, the 5 GiB object just BELOW the single-copy limit | ~22 min (measured) |
+| `all` | The 5 GiB plus-one boundary, a 6 GiB object, 500 locked objects | hours (estimate) |
+
+`full` does not cover the 5 GiB *plus one* boundary or the 6 GiB multipart
+object — those are `all`-only, because composing and copying 6 GiB takes ~20
+minutes by itself.
 
 The two measured tiers cost about the same because they drop and add comparable
 work: `full` loses the 500 s bulk-listing scenarios to `fast` and gains a 5 GiB
@@ -407,6 +411,10 @@ one) and there are ~65 scenarios, each building its own buckets, seeding, syncin
 three times and tearing down. Per-scenario durations vary by a factor of two
 between runs, so treat these as the order of magnitude. Running the suite is a
 deliberate act, not something to do on every save.
+
+`SCENARIO_TIMEOUT` overrides `go test`'s own timeout (45m / 90m / 4h by tier).
+It matters: a `go test` timeout panics without running cleanups, so every bucket
+live at that moment leaks and bills forever.
 
 `SCENARIO_CLI_BIN` additionally enables the one end-to-end test that drives the
 shipped binary rather than the library, so a flag wired into the engine but never

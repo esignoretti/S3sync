@@ -135,7 +135,28 @@ func TestScenarioRetentionJustExpired(t *testing.T) {
 		in.ObjectLockMode = types.ObjectLockModeGovernance
 		in.ObjectLockRetainUntilDate = aws.Time(time.Now().Add(2 * time.Second))
 	})
-	time.Sleep(3 * time.Second)
+	// Poll until the SOURCE's retention is genuinely in the past rather than
+	// sleeping a fixed 3s. The retain-until was computed before the PUT was
+	// dispatched, so on a slow round-trip it can arrive already expired — in
+	// which case a fixed sleep proves nothing about liveRetention, and a short
+	// one can still be racing.
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		head, err := e.Client.HeadObject(context.Background(), &s3.HeadObjectInput{
+			Bucket: aws.String(e.Source), Key: aws.String("stale.txt"),
+		})
+		if err != nil {
+			t.Fatalf("head source: %v", err)
+		}
+		if until := head.ObjectLockRetainUntilDate; until != nil && !until.After(time.Now()) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the source's retention never expired, so the case is not set up")
+		}
+		time.Sleep(time.Second)
+	}
+
 	e.sync()
 	if f := fetchFacts(t, e.Client, e.Target, "stale.txt"); f.RetentionMode != "" {
 		t.Fatalf("an expired retention was replicated: mode = %q", f.RetentionMode)

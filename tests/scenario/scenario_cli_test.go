@@ -93,6 +93,23 @@ func TestScenarioCLIEndToEnd(t *testing.T) {
 	if !lifecycleHasRule(t, client, tgt, "s3sync-expire") {
 		t.Fatal("the pair's expiry date did not produce an s3sync-expire lifecycle rule")
 	}
+
+	// A second sync must do no work. This is the suite's core assertion and the
+	// only test that drives the shipped binary, so without it a cache-poisoning
+	// or stale-fingerprint regression would be invisible at this level.
+	out, err = run("pair", "sync", pairIDByName(t, cfgDir, "cli"))
+	if err != nil {
+		t.Fatalf("second pair sync: %v\n%s", err, out)
+	}
+	if keys := targetKeysOf(t, client, tgt); len(keys) != 1 {
+		t.Fatalf("a second sync changed the target: %v", keys)
+	}
+	// The cache row must record the characteristics, or the next real run would
+	// re-copy: a target that still holds exactly one object is not sufficient,
+	// because a re-copy of the same key also leaves one object.
+	if f := fetchFacts(t, client, tgt, "cli/doc.txt"); f.Tags["via"] != "cli" {
+		t.Fatalf("target tags = %v after the second sync, want via=cli", f.Tags)
+	}
 }
 
 // bucketIDs opens the CLI's own config database and returns the full UUIDs of
