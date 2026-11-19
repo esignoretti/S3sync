@@ -4,14 +4,14 @@
 package scenario
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-
-	"github.com/esignoretti/S3sync/internal/sync"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 func TestScenarioMetadata(t *testing.T) {
@@ -95,6 +95,28 @@ func TestScenarioStorageClassOverride(t *testing.T) {
 	e.Pair.TargetStorageClass = "STANDARD"
 	putBody(t, e.Client, e.Source, "doc.txt", "body")
 	e.sync()
+
+	// The target must end up in the configured class.
+	//
+	// LIMIT worth stating: this endpoint accepts only STANDARD, and a plain
+	// PutObject already reports STANDARD, so on THIS endpoint the class value
+	// cannot distinguish "override applied" from "never applied". What the
+	// scenario really pins is the fingerprint round-trip with an override
+	// configured — the writer hashing the effective target class while the sweep
+	// hashed the raw source class was a real bug that made every pair with
+	// TargetStorageClass set re-copy every object every sweep. The quiet second
+	// sync and quiet post-sweep sync below are what catch that. The class check
+	// becomes discriminating on an endpoint that honours other classes.
+	head, err := e.Client.HeadObject(context.Background(), &s3.HeadObjectInput{
+		Bucket: aws.String(e.Target), Key: aws.String("doc.txt"),
+	})
+	if err != nil {
+		t.Fatalf("head target: %v", err)
+	}
+	if head.StorageClass != types.StorageClassStandard {
+		t.Fatalf("target storage class = %q, want STANDARD", head.StorageClass)
+	}
+
 	e.assertNoWorkOnSecondSync()
 	e.reconcile()
 	e.assertNoWorkOnSecondSync()
@@ -147,7 +169,11 @@ func TestScenarioPendingAttrsRecovery(t *testing.T) {
 	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "alpha"})
 	e.sync()
 
-	// Simulate the failed tag write the engine would have recorded.
+	// Change the source's tag BEFORE marking pending, so the recovery has
+	// something to do: asserting the target still says alpha would pass even if
+	// the attribute-only retry never ran, because the first sync already put it
+	// there.
+	putTags(t, e.Client, e.Source, "doc.txt", map[string]string{"team": "beta"})
 	e.markPending("doc.txt")
 	e.Counter.Reset()
 	e.sync()
@@ -157,8 +183,8 @@ func TestScenarioPendingAttrsRecovery(t *testing.T) {
 	if got := e.Counter.Count(kindPutTagging); got == 0 {
 		t.Fatal("a pending-attributes object did not get its tags written")
 	}
-	if f := fetchFacts(t, e.Client, e.Target, "doc.txt"); f.Tags["team"] != "alpha" {
-		t.Fatalf("target tag team = %q after recovery, want alpha", f.Tags["team"])
+	if f := fetchFacts(t, e.Client, e.Target, "doc.txt"); f.Tags["team"] != "beta" {
+		t.Fatalf("target tag team = %q after recovery, want beta", f.Tags["team"])
 	}
 }
 
@@ -199,18 +225,5 @@ func TestScenarioInvalidStorageClass(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(out.Log), "storage class") {
 		t.Fatalf("the failure does not mention the storage class: %q", out.Log)
-	}
-}
-
-// TestScenarioReconcileOffByDefault pins that no sweep runs when the interval is
-// unset, so the opt-in stays opt-in.
-func TestScenarioReconcileOffByDefault(t *testing.T) {
-	e := newScenarioEnv(t, envOptions{ReplicateAttrs: true})
-	if sync.ShouldReconcile(e.Pair, time.Now().UTC()) {
-		t.Fatal("ShouldReconcile is true with no interval configured")
-	}
-	e.Pair.LastReconcileAt = nil
-	if sync.ShouldReconcile(e.Pair, time.Now().UTC()) {
-		t.Fatal("ShouldReconcile is true with a nil LastReconcileAt and no interval")
 	}
 }

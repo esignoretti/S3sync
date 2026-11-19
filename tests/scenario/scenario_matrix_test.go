@@ -38,11 +38,25 @@ func TestScenarioDryRunDoesNotProvision(t *testing.T) {
 	e := newScenarioEnv(t, envOptions{TargetExpireIn: 30 * 24 * time.Hour})
 	e.Pair.DryRun = true
 	e.sync()
+
+	// Half one: the lifecycle was not rewritten.
 	_, err := e.Client.GetBucketLifecycleConfiguration(context.Background(), &s3.GetBucketLifecycleConfigurationInput{
 		Bucket: aws.String(e.Target),
 	})
 	if err == nil {
 		t.Fatal("a dry run wrote a lifecycle configuration")
+	}
+
+	// Half two: the bucket was not CREATED. This needs the bucket to be absent,
+	// and the harness creates it before the run, so destroy it and sync again —
+	// asserting the bucket's absence is the only way to observe creation.
+	e.seed([]string{"obj/0001-small.bin"})
+	destroyBucket(t, e.Client, e.Target)
+	e.sync()
+	if _, err := e.Client.HeadBucket(context.Background(), &s3.HeadBucketInput{
+		Bucket: aws.String(e.Target),
+	}); !isNoSuchBucket(err) {
+		t.Fatalf("a dry run created the target bucket (HeadBucket err = %v)", err)
 	}
 }
 

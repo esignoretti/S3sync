@@ -83,6 +83,21 @@ func TestScenarioLegalHold(t *testing.T) {
 	if f := fetchFacts(t, e.Client, e.Target, "hold.txt"); f.LegalHold != "ON" {
 		t.Fatalf("target legal hold = %q, want ON", f.LegalHold)
 	}
+
+	// The point of a legal hold is that it blocks deletion independently of any
+	// retention period — there is no retain-until here at all. Deleting the
+	// VERSION (not just the key, which only writes a delete marker) must fail
+	// even with the governance bypass.
+	version := currentVersionID(t, e.Client, e.Target, "hold.txt")
+	_, err := e.Client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+		Bucket:                    aws.String(e.Target),
+		Key:                       aws.String("hold.txt"),
+		VersionId:                 aws.String(version),
+		BypassGovernanceRetention: aws.Bool(true),
+	})
+	if err == nil {
+		t.Fatal("a legal-held version was deleted despite the hold")
+	}
 }
 
 // TestScenarioLockWithoutTargetLock is the failure mode Review Focus 5 names:

@@ -80,3 +80,46 @@ func TestKeepBucket(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanupBucketHonoursScenarioKeep pins the WIRING, not just the predicate:
+// the README promises a failing scenario's buckets survive for inspection while
+// a passing one is always torn down. It calls the real cleanup entry point with
+// each failure flag, so a regression that moved the keep decision (or read the
+// environment at package init) fails here.
+func TestCleanupBucketHonoursScenarioKeep(t *testing.T) {
+	client, _ := newClient(t)
+
+	t.Run("failing scenario is preserved", func(t *testing.T) {
+		t.Setenv("SCENARIO_KEEP", "1")
+		name := createBucketNoCleanup(t, client)
+		cleanupBucket(t, client, name, true)
+		if _, err := client.HeadBucket(context.Background(), &s3.HeadBucketInput{
+			Bucket: aws.String(name),
+		}); err != nil {
+			t.Fatalf("a failing scenario's bucket was destroyed despite SCENARIO_KEEP: %v", err)
+		}
+		destroyBucket(t, client, name) // the point of the test is that this did not happen
+	})
+
+	t.Run("passing scenario is torn down", func(t *testing.T) {
+		t.Setenv("SCENARIO_KEEP", "1")
+		name := createBucketNoCleanup(t, client)
+		cleanupBucket(t, client, name, false)
+		if _, err := client.HeadBucket(context.Background(), &s3.HeadBucketInput{
+			Bucket: aws.String(name),
+		}); !isNoSuchBucket(err) {
+			t.Fatalf("a passing scenario's bucket survived SCENARIO_KEEP (err = %v)", err)
+		}
+	})
+
+	t.Run("flag unset tears down either way", func(t *testing.T) {
+		t.Setenv("SCENARIO_KEEP", "")
+		name := createBucketNoCleanup(t, client)
+		cleanupBucket(t, client, name, true)
+		if _, err := client.HeadBucket(context.Background(), &s3.HeadBucketInput{
+			Bucket: aws.String(name),
+		}); !isNoSuchBucket(err) {
+			t.Fatalf("a bucket survived without SCENARIO_KEEP (err = %v)", err)
+		}
+	})
+}

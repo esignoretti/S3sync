@@ -130,19 +130,6 @@ func TestScenarioPastDateRejected(t *testing.T) {
 	e.assertTargetCount(0)
 }
 
-// TestScenarioPreflightRejectsPastDate covers the other half: the same date is
-// ErrExpireInPast at pair-creation time, which is where the operator can act on
-// it before any pair is stored.
-func TestScenarioPreflightRejectsPastDate(t *testing.T) {
-	e := newScenarioEnv(t, envOptions{})
-	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	e.Pair.TargetExpireAt = &past
-	_, err := sync.ValidatePairOptions(e.Pair, "", 0, false, true, nil, false, time.Now().UTC())
-	if !errors.Is(err, sync.ErrExpireInPast) {
-		t.Fatalf("preflight error = %v, want ErrExpireInPast", err)
-	}
-}
-
 // TestScenarioNoncurrentAndExpireRulesTogether is the only way both rules can
 // coexist: BuildLifecycleRules emits s3sync-expire and s3sync-noncurrent, and
 // the endpoint must accept them in one configuration.

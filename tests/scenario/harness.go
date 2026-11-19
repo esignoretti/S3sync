@@ -90,14 +90,35 @@ func createBucket(t *testing.T, client *s3.Client, objectLock bool) string {
 	if _, err := client.CreateBucket(context.Background(), in); err != nil {
 		t.Fatalf("create scratch bucket %q: %v", name, err)
 	}
-	t.Cleanup(func() {
-		if keepBucket(os.Getenv("SCENARIO_KEEP"), t.Failed()) {
-			t.Logf("SCENARIO_KEEP: leaving bucket %q for inspection", name)
-			return
-		}
-		destroyBucket(t, client, name)
-	})
+	t.Cleanup(func() { cleanupBucket(t, client, name, t.Failed()) })
 	return name
+}
+
+// createBucketNoCleanup creates a scratch bucket WITHOUT registering teardown,
+// for tests of the teardown decision itself.
+func createBucketNoCleanup(t *testing.T, client *s3.Client) string {
+	t.Helper()
+	name := fmt.Sprintf("s3sync-sc-%d", time.Now().UnixNano())
+	if _, err := client.CreateBucket(context.Background(), &s3.CreateBucketInput{
+		Bucket: aws.String(name),
+	}); err != nil {
+		t.Fatalf("create scratch bucket %q: %v", name, err)
+	}
+	return name
+}
+
+// cleanupBucket applies the SCENARIO_KEEP decision. It takes the failure flag
+// rather than reading t.Failed() itself so a test can exercise both branches:
+// a subtest that fails deliberately poisons its parent, so the wiring could
+// otherwise only be checked by the pure predicate — which would not catch a
+// regression that read the flag at the wrong time.
+func cleanupBucket(t *testing.T, client *s3.Client, name string, failed bool) {
+	t.Helper()
+	if keepBucket(os.Getenv("SCENARIO_KEEP"), failed) {
+		t.Logf("SCENARIO_KEEP: leaving bucket %q for inspection", name)
+		return
+	}
+	destroyBucket(t, client, name)
 }
 
 // keepBucket decides whether a scenario's bucket survives the run.
