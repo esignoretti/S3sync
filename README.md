@@ -370,6 +370,52 @@ go test -tags=integration ./tests/ -run TestDS3 -v
 
 Each test creates and deletes its own scratch bucket and skips when the endpoint is absent.
 
+### Scenario tests
+
+`tests/scenario/` is the behavioural suite. Where the unit tests pin individual
+functions, these drive the real `Engine`, `WorkerPool`, differ, sweep and
+provisioning against a live endpoint, and assert on what actually landed in the
+target bucket — bytes, metadata, tags, retention, version count, lifecycle
+rules. Every scenario syncs twice and requires the second sync to copy nothing,
+which is the assertion that catches the whole class of bugs where work is
+reported as done without being done (a poisoned cache, a stale attribute
+fingerprint, a dry run that writes).
+
+They run on a remote host because the large fixtures need ~10 GB of free disk
+and are built server-side (a 6 GiB object is composed from one 64 MiB seed with
+`UploadPartCopy`, never uploaded):
+
+```bash
+export S3_TEST_ENDPOINT=https://s3.cubbit.eu
+export S3_TEST_ACCESS_KEY=... S3_TEST_SECRET_KEY=...
+./tests/run-scenarios.sh full root@your-host
+```
+
+Three tiers, selected with `SCENARIO_TIER`:
+
+| Tier | Adds | Measured |
+| --- | --- | --- |
+| `fast` | Every behaviour that needs no large object and no bulk seeding | ~15 minutes |
+| `full` | 1,200-object listing scenario, 5 GiB compositions either side of the single-copy limit | ~55 minutes |
+| `all` | 6 GiB multipart objects, 500 locked objects | ~2 hours |
+
+The times are what this suite actually costs against a distributed endpoint,
+not an estimate: every S3 request is a network round-trip, ~750 ms to `HEAD` an
+object and ~1.3 s to copy one, and there are ~60 scenarios each of which builds
+its own buckets, seeds, syncs three times and tears down. Running the whole suite
+is a deliberate act, not something to do on every save.
+
+`SCENARIO_CLI_BIN` additionally enables the one end-to-end test that drives the
+shipped binary rather than the library, so a flag wired into the engine but never
+registered on the command is caught. `SCENARIO_KEEP=1` preserves the buckets of a
+failing scenario for inspection instead of tearing them down.
+
+The suite is not wired into CI: it needs live credentials and a host with real
+disk. Buckets are named `s3sync-sc-<unixnano>` and torn down by a routine that
+paginates every version including delete markers, lifts legal holds, aborts
+incomplete uploads and waits out any retention still in force — it verifies the
+bucket is gone rather than assuming it.
+
 ## License
 
 MIT

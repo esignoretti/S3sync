@@ -35,6 +35,9 @@ func TestScenarioSingleObject(t *testing.T) {
 }
 
 func TestScenarioManySmall(t *testing.T) {
+	if tier() == tierFast {
+		t.Skip("1,200 objects; set SCENARIO_TIER=full")
+	}
 	if testing.Short() {
 		t.Skip("1,200 objects")
 	}
@@ -53,6 +56,9 @@ func TestScenarioManySmall(t *testing.T) {
 }
 
 func TestScenarioManySmallWithDeletes(t *testing.T) {
+	if tier() == tierFast {
+		t.Skip("120 objects; set SCENARIO_TIER=full")
+	}
 	e := newScenarioEnv(t, envOptions{})
 	e.Pair.DeletePropagation = true
 	keys := manyKeys(120)

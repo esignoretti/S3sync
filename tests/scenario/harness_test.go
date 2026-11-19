@@ -58,3 +58,25 @@ func TestNewScenarioEnvRefusesExistingBucket(t *testing.T) {
 		t.Fatalf("error does not name the offending bucket %q: %v", name, err)
 	}
 }
+
+// TestKeepBucket pins the SCENARIO_KEEP contract the README promises: a failing
+// scenario's buckets survive for inspection, a passing scenario's never do.
+// Keeping a passing scenario's bucket would turn a debug flag into a leak, and
+// on this endpoint a leaked bucket bills forever.
+func TestKeepBucket(t *testing.T) {
+	cases := []struct {
+		keep   string
+		failed bool
+		want   bool
+	}{
+		{"", false, false},
+		{"", true, false},
+		{"1", false, false},
+		{"1", true, true},
+	}
+	for _, c := range cases {
+		if got := keepBucket(c.keep, c.failed); got != c.want {
+			t.Fatalf("keepBucket(%q, failed=%v) = %v, want %v", c.keep, c.failed, got, c.want)
+		}
+	}
+}

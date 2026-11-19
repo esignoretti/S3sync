@@ -90,8 +90,24 @@ func createBucket(t *testing.T, client *s3.Client, objectLock bool) string {
 	if _, err := client.CreateBucket(context.Background(), in); err != nil {
 		t.Fatalf("create scratch bucket %q: %v", name, err)
 	}
-	t.Cleanup(func() { destroyBucket(t, client, name) })
+	t.Cleanup(func() {
+		if keepBucket(os.Getenv("SCENARIO_KEEP"), t.Failed()) {
+			t.Logf("SCENARIO_KEEP: leaving bucket %q for inspection", name)
+			return
+		}
+		destroyBucket(t, client, name)
+	})
 	return name
+}
+
+// keepBucket decides whether a scenario's bucket survives the run.
+//
+// SCENARIO_KEEP preserves the buckets of a FAILING scenario so the target can be
+// inspected; a passing scenario is always cleaned up, because a leaked bucket on
+// this endpoint bills forever. Keeping everything would make the debug flag a
+// leak, and keeping nothing would make it useless.
+func keepBucket(scenarioKeep string, failed bool) bool {
+	return scenarioKeep != "" && failed
 }
 
 // destroyBucket removes a bucket and everything in it, then proves it is gone.
@@ -1011,4 +1027,27 @@ func copySelfWithMetadata(t *testing.T, client *s3.Client, bucket, key string, m
 // this endpoint accepts for a lifecycle Expiration.Date.
 func midnightUTC(days int) time.Time {
 	return time.Now().UTC().AddDate(0, 0, days).Truncate(24 * time.Hour)
+}
+
+// targetKeysOf lists a bucket's keys, for scenarios that drive the CLI and so
+// have no scenarioEnv.
+func targetKeysOf(t *testing.T, client *s3.Client, bucket string) []string {
+	t.Helper()
+	keys, err := listAll(t, client, bucket)
+	if err != nil {
+		t.Fatalf("list %s: %v", bucket, err)
+	}
+	return keys
+}
+
+// lifecycleHasRule reports whether the bucket's lifecycle configuration carries
+// the named rule, for scenarios that assert a flag reached the bucket.
+func lifecycleHasRule(t *testing.T, client *s3.Client, bucket, id string) bool {
+	t.Helper()
+	cfg, err := client.GetBucketLifecycleConfiguration(context.Background(),
+		&s3.GetBucketLifecycleConfigurationInput{Bucket: aws.String(bucket)})
+	if err != nil {
+		t.Fatalf("get lifecycle for %s: %v", bucket, err)
+	}
+	return contains(ruleIDs(cfg.Rules), id)
 }
