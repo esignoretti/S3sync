@@ -397,26 +397,27 @@ Three tiers, selected with `SCENARIO_TIER`:
 
 | Tier | Adds | Time |
 | --- | --- | --- |
-| `fast` | Every behaviour that needs no large object and no bulk seeding | ~20 min (measured) |
-| `full` | 1,200-object listing scenario, the 5 GiB object just BELOW the single-copy limit | ~22 min (measured) |
+| `fast` | Every behaviour that needs no large object and no bulk seeding | 239 s measured (700 s on an earlier run) |
+| `full` | 1,200-object listing scenario, 120 objects with deletes, the 5 GiB object just BELOW the single-copy limit | 889 s measured |
 | `all` | The 5 GiB plus-one boundary, a 6 GiB object, 500 locked objects | hours (estimate) |
 
 `full` does not cover the 5 GiB *plus one* boundary or the 6 GiB multipart
 object — those are `all`-only, because composing and copying 6 GiB takes ~20
 minutes by itself.
 
-The two measured tiers cost about the same because they drop and add comparable
-work: `full` loses the 500 s bulk-listing scenarios to `fast` and gains a 5 GiB
-composition. The times are real, not estimates — every S3 request here is a
-round-trip to a distributed endpoint (~750 ms to `HEAD` an object, ~1.3 s to copy
-one) and there are ~65 scenarios, each building its own buckets, seeding, syncing
-three times and tearing down. Per-scenario durations vary by a factor of two
-between runs, so treat these as the order of magnitude. Running the suite is a
+The times are real, not estimates — every S3 request here is a round-trip to a
+distributed endpoint (~750 ms to `HEAD` an object, ~1.3 s to copy one) and there
+are ~65 scenarios, each building its own buckets, seeding, syncing three times
+and tearing down. The same `fast` tier took 239 s on one run and 700 s on
+another, so treat these as the order of magnitude. Running the suite is a
 deliberate act, not something to do on every save.
 
 `SCENARIO_TIMEOUT` overrides `go test`'s own timeout (45m / 90m / 4h by tier).
 It matters: a `go test` timeout panics without running cleanups, so every bucket
 live at that moment leaks and bills forever.
+
+Every test, what it asserts and the measured result per scenario is recorded in
+[`docs/TESTING.md`](docs/TESTING.md).
 
 `SCENARIO_CLI_BIN` additionally enables the one end-to-end test that drives the
 shipped binary rather than the library, so a flag wired into the engine but never
