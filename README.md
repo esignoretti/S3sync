@@ -267,7 +267,16 @@ If the cache is missing or corrupted, everything is re-copied. The diff cache is
 
 ## Replicating Object Characteristics
 
-By default a pair copies bytes and the storage class. With `--replicate-attributes` it also carries the source object's characteristics to the target:
+By default a pair copies bytes and the storage class — but **not only** those. A
+`CopyObject` with no `MetadataDirective` still carries the source's metadata and
+tags, because both default to `COPY` on this endpoint (measured, not assumed:
+`ct=text/x-source meta=map[origin:prod]` came back from a directive-less copy).
+What the default path does not do is record or check them: with replication off
+the cache stores no attribute fingerprint, so nothing ever notices when they
+drift, and retention is never applied at all.
+
+With `--replicate-attributes` the pair takes ownership of the source object's
+characteristics and keeps them reconciled:
 
 | Characteristic | How |
 |----------------|-----|
@@ -284,7 +293,7 @@ By default a pair copies bytes and the storage class. With `--replicate-attribut
 
 **Drift sweep.** `--attrs-reconcile-interval <seconds>` (default off) periodically re-reads each source object's attributes and re-copies any whose fingerprint no longer matches the cache. This is what catches tag-only edits on objects whose bytes never changed. It costs one HEAD plus one tag read per cached object per sweep, throttled against `max_get_ops_per_minute`.
 
-**Enabling it later does not backfill.** Objects already cached before `--replicate-attributes` was turned on have no fingerprint, and the sweep deliberately treats a missing fingerprint as "unknown" rather than "drifted" — otherwise every pre-existing object would be re-copied on the first sweep. Their characteristics therefore only reach the target when their bytes next change. Run `s3sync pair reset <id>` to clear the cache and force a full re-copy if you need them backfilled; `pair update` prints a warning saying so.
+**Enabling it later does not backfill.** Objects already cached before `--replicate-attributes` was turned on have no fingerprint, and the sweep deliberately treats a missing fingerprint as "unknown" rather than "drifted" — otherwise every pre-existing object would be re-copied on the first sweep. Those objects therefore keep whatever metadata and tags the default copy already gave them, but their **retention is not applied** and any later metadata or tag edit is never noticed or repaired. Run `s3sync pair reset <id>` to clear the cache and force a full re-copy if you need them reconciled; `pair update` prints a warning saying so.
 
 ## Object Lock and Target Expiry
 

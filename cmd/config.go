@@ -27,7 +27,7 @@ func openConfig() (*config.Repository, func(), error) {
 	return config.NewRepository(db), func() { db.Close() }, nil
 }
 
-var configCmd = &cobra.Command{Use: "config", Short: "Manage configuration"}
+var configCmd = groupCommand("config", "Manage configuration")
 
 var configInitCmd = &cobra.Command{
 	Use:   "init",

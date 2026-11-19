@@ -74,6 +74,7 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 		// status, so returning without writing leaves a dead pair looking healthy
 		// until the next successful run — which for an expired pair never comes.
 		persistStatus(repo, pair, engine)
+		persistLog(repo, pair, engine, start, err)
 		fmt.Fprintf(os.Stderr, "\nSync FAILED: %v\n", err)
 		return fmt.Errorf("sync: %w", err)
 	}
@@ -84,6 +85,7 @@ func RunOneShot(ctx context.Context, repo *config.Repository, pairID, cacheDir s
 	_, _, status, _, prog := engine.Status()
 	fmt.Fprintf(os.Stderr, "\r  objects: %d copied, %d failed  \n", prog.Completed, prog.Failed)
 	persistStatus(repo, pair, engine)
+	persistLog(repo, pair, engine, start, nil)
 
 	fmt.Printf("Sync complete for %q. Status: %s (duration: %s)\n", pair.Name, status, time.Since(start).Round(time.Second))
 	return nil
@@ -112,6 +114,33 @@ func persistStatus(repo *config.Repository, pair *config.SyncPair, engine *Engin
 	}
 	if err := repo.UpdateSyncPair(pair); err != nil {
 		slog.Warn("failed to persist pair status", "pair", pair.Name, "error", err)
+	}
+}
+
+// persistLog records the run in sync_logs, which is what the dashboard's history
+// view and the API's /logs endpoint read.
+//
+// Only the API path wrote these rows (internal/api/router.go's afterSync), so a
+// pair driven by `pair sync` from cron had no history at all: the dashboard
+// showed an empty log for a pair that was syncing every few minutes. Failures are
+// logged, not returned — the run's own outcome is already being reported.
+func persistLog(repo *config.Repository, pair *config.SyncPair, engine *Engine, startedAt time.Time, runErr error) {
+	_, _, status, lastError, _ := engine.Status()
+	succeeded, failed := engine.LastResult()
+	errMsg := lastError
+	if runErr != nil {
+		errMsg = runErr.Error()
+	}
+	if err := repo.CreateSyncLog(&config.SyncLogEntry{
+		PairID:      pair.ID,
+		Status:      status,
+		ErrorMsg:    errMsg,
+		Succeeded:   succeeded,
+		Failed:      failed,
+		StartedAt:   startedAt,
+		CompletedAt: time.Now().UTC(),
+	}); err != nil {
+		slog.Warn("failed to write sync log", "pair", pair.Name, "error", err)
 	}
 }
 

@@ -19,6 +19,17 @@ import (
 // moving target_expire_at into the future.
 var ErrPairExpired = errors.New("sync pair target expiry has passed")
 
+// ErrObjectsFailed reports a run that completed but could not copy every
+// object. The run itself is over — this is not a transient condition the caller
+// should retry differently — but the outcome is a failure, and the caller has to
+// be able to tell.
+//
+// RunOnce returns nil for it only if the caller reads the status instead. A
+// one-shot `pair sync` driven by cron has no such reader: without this error it
+// exits 0 while objects failed to copy, so the scheduler never sees the failure
+// and nothing retries or alerts.
+var ErrObjectsFailed = errors.New("one or more objects failed to copy")
+
 type Progress struct {
 	mu        sync.Mutex
 	Total     int `json:"total"`
@@ -441,7 +452,6 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	}
 	e.setResult(status, lastErr)
 	e.lastRun = time.Now()
-
 	if e.pair.WebhookURL != "" {
 		go func() {
 			p := WebhookPayload{
@@ -460,6 +470,14 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 			}
 			SendWebhook(e.pair.WebhookURL, e.pair.WebhookEvents, p)
 		}()
+	}
+
+	// The run finished, but not successfully. Returning nil here is what let a
+	// cron-driven `pair sync` exit 0 while objects failed: the status says
+	// "error" but the exit code said success, and only a human reading the
+	// dashboard would ever notice.
+	if failed > 0 {
+		return fmt.Errorf("%w: %d of %d", ErrObjectsFailed, failed, totalActions)
 	}
 
 	return nil

@@ -9,12 +9,13 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/esignoretti/S3sync/internal/cache"
 	"github.com/esignoretti/S3sync/internal/config"
 	"github.com/esignoretti/S3sync/internal/sync"
 	"github.com/spf13/cobra"
 )
 
-var pairCmd = &cobra.Command{Use: "pair", Short: "Manage sync pairs"}
+var pairCmd = groupCommand("pair", "Manage sync pairs")
 
 var pairAddCmd = &cobra.Command{
 	Use:   "add [name]",
@@ -312,6 +313,58 @@ var pairSyncCmd = &cobra.Command{
 	},
 }
 
+// pairResetCmd clears a pair's sync cache and its error state.
+//
+// The README and the attrs-not-backfilled advisory both tell an operator to run
+// this — it is the only way to force a full re-copy, which is what backfills the
+// characteristics of objects cached before --replicate-attributes was enabled.
+// The API and the dashboard had it; the CLI did not, so the documented remedy was
+// unrunnable for anyone driving sync from cron.
+var pairResetCmd = &cobra.Command{
+	Use:   "reset [id]",
+	Short: "Clear a pair's sync cache and error state",
+	Long: `Clear a pair's sync cache and error state.
+
+The next sync then re-copies every object, which is the only way to backfill the
+characteristics of objects cached before --replicate-attributes was enabled.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		repo, close, err := openConfig()
+		if err != nil {
+			return err
+		}
+		defer close()
+
+		p, err := repo.GetSyncPair(args[0])
+		if err != nil {
+			return fmt.Errorf("get pair: %w", err)
+		}
+
+		cacheStore, err := cache.Open(filepath.Join(defaultConfigDir(), "cache.db"))
+		if err != nil {
+			return fmt.Errorf("open cache: %w", err)
+		}
+		defer cacheStore.Close()
+
+		if err := cacheStore.Clear(p.ID); err != nil {
+			return fmt.Errorf("clear cache: %w", err)
+		}
+
+		// Match the API's reset: the pair becomes eligible to run again with a clean
+		// slate, rather than staying disabled or stuck at its error count.
+		p.LastSyncAt = nil
+		p.LastSyncStatus = ""
+		p.ConsecutiveErrors = 0
+		p.Enabled = true
+		if err := repo.UpdateSyncPair(p); err != nil {
+			return fmt.Errorf("update pair: %w", err)
+		}
+
+		fmt.Printf("Reset %q. The next sync will re-copy every object.\n", p.Name)
+		return nil
+	},
+}
+
 func init() {
 	pairAddCmd.Flags().String("source-bucket", "", "Source bucket ID")
 	pairAddCmd.Flags().String("target-bucket", "", "Target bucket ID")
@@ -351,6 +404,6 @@ func init() {
 	pairUpdateCmd.Flags().Bool("require-object-lock", false, "Not settable after creation (rejected)")
 	pairUpdateCmd.Flags().String("on-lock-missing", "fail", "Not settable after creation (rejected)")
 
-	pairCmd.AddCommand(pairAddCmd, pairListCmd, pairGetCmd, pairUpdateCmd, pairDeleteCmd, pairSyncCmd)
+	pairCmd.AddCommand(pairAddCmd, pairListCmd, pairGetCmd, pairUpdateCmd, pairDeleteCmd, pairSyncCmd, pairResetCmd)
 	rootCmd.AddCommand(pairCmd)
 }

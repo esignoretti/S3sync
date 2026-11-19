@@ -208,3 +208,28 @@ func TestApplyPairFlagsDryRun(t *testing.T) {
 		t.Fatal("dry-run flag was not applied")
 	}
 }
+
+// An unknown subcommand used to print help and exit 0, so a typo in a cron entry
+// ("pair synk <id>") silently did nothing and reported success. This asserts the
+// exit path a shell actually sees, not just that cobra has the subcommand.
+func TestUnknownSubcommandIsAnError(t *testing.T) {
+	// Args must be set on the ROOT: Command.Execute on a child delegates to the
+	// root, which reads the root's args. Setting them on the child silently
+	// leaves the root parsing the test binary's own flags, and every assertion
+	// below would pass for the wrong reason.
+	for _, group := range []string{"pair", "bucket", "config"} {
+		rootCmd.SetArgs([]string{group, "wibble"})
+		if err := rootCmd.Execute(); err == nil {
+			t.Errorf("%s wibble: err = nil, want an error: a typo must not exit 0", group)
+		}
+	}
+
+	// A bare group command must still succeed: that is how its help is reached.
+	for _, group := range []string{"pair", "bucket", "config"} {
+		rootCmd.SetArgs([]string{group})
+		if err := rootCmd.Execute(); err != nil {
+			t.Errorf("%s with no subcommand: err = %v, want nil", group, err)
+		}
+	}
+	rootCmd.SetArgs(nil)
+}

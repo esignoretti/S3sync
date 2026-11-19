@@ -5,7 +5,8 @@ here comes from a recorded run against Cubbit DS3 (`https://s3.cubbit.eu`), not
 from an estimate. Where a figure is a single measurement that varies, the
 variance is stated rather than averaged away.
 
-- Version: **0.3.0** (commit `23f5dfc`, tag `v0.3.0`)
+- Version: **0.3.0** (tag `v0.3.0`; the CLI-truthfulness fixes below landed after
+  the tag and are covered by the unit suite, not by a new scenario tier run)
 - Endpoint: Cubbit DS3, `https://s3.cubbit.eu`, region `us-east-1`
 - Go: `go test` on the host plus cross-compiled `linux/amd64` binaries on
   `51.159.133.103` (Ubuntu 26.04, 2 cores, 3 GB RAM, 5.1 GB free disk)
@@ -275,7 +276,32 @@ failing test, not by reading code.
    pinned, so a regression that read `t.Failed()` at the wrong time would have
    turned the debug flag into a silent no-op or a leak.
 
-## 7. Known limits
+## 7. CLI truthfulness
+
+Five defects made the CLI report success for work it had not done. All were found
+by running the binary, not by reading code, and all are fixed with tests that
+were verified RED before the fix.
+
+| Defect | Before | After |
+| --- | --- | --- |
+| `pair reset` missing | `s3sync pair reset <id>` printed help, exit **0**, did nothing — while the README and the `attrs-not-backfilled` warning both told operators to run it | Subcommand added; clears the cache and error state, exit 0 on success, 1 on an unknown pair |
+| Unknown subcommand | `pair synk <id>`, `bucket wibbl`, `config lst` all printed help and exited **0** | Exit **1** with `unknown command "synk" for "s3sync pair"`. A bare group command and `--help` still exit 0 |
+| Partial sync failure | `RunOnce` returned nil with status `error`, so `pair sync` exited **0** while objects failed | Returns `ErrObjectsFailed`; `pair sync` exits **1**: `one or more objects failed to copy: 1 of 6` |
+| CLI sync history | Only the API wrote `sync_logs`, so a cron-driven pair had an empty dashboard history | `RunOneShot` writes a row on both the success and the refused path |
+| Replication-off docs | README claimed "copies bytes and the storage class"; a directive-less `CopyObject` also carries metadata and tags | README and the advisory state what actually arrives and what does not (retention, and any later drift repair) |
+
+Root cause of the exit-code defects is the same shape: `cobra` treats an
+unrecognised word as an argument to a non-runnable parent and returns
+`flag.ErrHelp`, and `RunOnce` conflated "the run finished" with "the run
+succeeded". Both are now pinned by tests, including the awkward half of each —
+`pair` with no subcommand must still exit 0, and a clean run must still return
+nil, or every cron job starts failing and the signal becomes worthless.
+
+Verified live against Cubbit DS3 with the real binary: a reset forced 5 objects
+to re-copy, the failing `locked.txt` produced exit 1, the history row recorded
+`error | 5 | 1`, and the three typo cases each exited 1.
+
+## 8. Known limits
 
 Stated plainly, because a test document that only lists successes is not useful.
 
@@ -303,7 +329,7 @@ Stated plainly, because a test document that only lists successes is not useful.
   deleted buckets, so the leak detector confirms each candidate with a `HeadBucket`
   before reporting.
 
-## 8. Leak hygiene
+## 9. Leak hygiene
 
 Scratch buckets are named `s3sync-sc-<unixnano>` and destroyed by a teardown that
 paginates `ListObjectVersions` (including delete markers), aborts incomplete

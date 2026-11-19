@@ -155,6 +155,10 @@ type engineEndpoint struct {
 	listCalls          int
 	headBlockKey       string // when set, the HEAD for this key waits on headBlock
 	headBlock          chan struct{}
+	// copyFails makes CopyObject answer 500, so a run copies nothing and every
+	// action fails. That is the state a caller must be able to detect: the run
+	// completed, but the objects did not arrive.
+	copyFails bool
 }
 
 // engineListingObject is one source object whose identity matches
@@ -212,6 +216,8 @@ func (f *engineEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><Tagging><TagSet>`+f.tags+`</TagSet></Tagging>`)
 	case r.Method == http.MethodPut && r.URL.Query().Has("tagging"):
 		w.WriteHeader(http.StatusOK)
+	case r.Method == http.MethodPut && f.copyFails:
+		w.WriteHeader(http.StatusInternalServerError)
 	case r.Method == http.MethodPut:
 		w.Header().Set("Content-Type", "application/xml")
 		io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><CopyObjectResult><ETag>"e1"</ETag></CopyObjectResult>`)
@@ -370,6 +376,40 @@ func TestProgressCountsPendingAttrs(t *testing.T) {
 	}
 	if got := p.PendingCount(); got != 1 {
 		t.Fatalf("PendingCount = %d, want 1", got)
+	}
+}
+
+// A run that copies some objects and fails others is a failure, and RunOnce has
+// to say so. Before this, it returned nil with status "error": `pair sync` exited
+// 0, so a cron job could not distinguish a clean run from one where every object
+// failed, and nothing retried or alerted.
+func TestRunOnce_ReturnsErrorWhenObjectsFail(t *testing.T) {
+	// A source object with no matching cache entry is copied; make the copy fail
+	// by having the target reject it.
+	ep := &engineEndpoint{
+		objects:   []string{engineListingObject},
+		copyFails: true,
+	}
+	pair := &config.SyncPair{}
+	e := newTestEngine(t, pair, ep)
+
+	err := e.RunOnce(context.Background())
+	if !errors.Is(err, ErrObjectsFailed) {
+		t.Fatalf("err = %v, want ErrObjectsFailed; a run with failed objects must not "+
+			"report success to its caller", err)
+	}
+	if _, _, status, _, _ := e.Status(); status != "error" {
+		t.Fatalf("status = %q, want \"error\"", status)
+	}
+}
+
+// The converse matters as much: a clean run must still return nil, or every cron
+// job starts failing and the signal becomes worthless.
+func TestRunOnce_CleanRunReturnsNil(t *testing.T) {
+	ep := &engineEndpoint{}
+	e := newTestEngine(t, &config.SyncPair{}, ep)
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("a run that copied nothing failed: %v", err)
 	}
 }
 

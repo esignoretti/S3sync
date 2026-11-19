@@ -137,12 +137,19 @@ func advisoryWarnings(pair *config.SyncPair, retentionMode string, retentionDays
 	// fingerprint, and the sweep deliberately treats an empty fingerprint as
 	// "unknown" rather than "drifted". Nothing backfills them, so their
 	// characteristics only reach the target when their bytes change.
+	//
+	// The wording names metadata and tags explicitly rather than saying "their
+	// characteristics": a CopyObject with no MetadataDirective still carries both
+	// by endpoint default, so those did arrive. What did not arrive is the
+	// fingerprint, which means nothing ever checks or repairs them — retention
+	// and any later edit are what actually go missing.
 	if pair.ReplicateAttributes && replicationWasOff {
 		warns = append(warns, AdvisoryWarning{
 			Code: "attrs-not-backfilled",
-			Message: "objects already synced before attribute replication was enabled will not " +
-				"have their characteristics copied unless their bytes change; run " +
-				"`pair reset` to force a full re-copy if you need them backfilled",
+			Message: "objects synced before attribute replication was enabled have no " +
+				"attribute fingerprint, so their retention and any later metadata or tag " +
+				"edits are never checked or repaired; run `pair reset` to force a full " +
+				"re-copy if you need them reconciled",
 		})
 	}
 

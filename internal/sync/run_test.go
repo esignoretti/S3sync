@@ -123,3 +123,50 @@ func TestRunOneShot_PersistsProvisionState(t *testing.T) {
 			"never report anything, so an operator sees no reason for the failure")
 	}
 }
+
+// A one-shot sync from the CLI must leave a history row. Only the API path
+// wrote sync_logs, so a pair driven by cron had an empty history in the
+// dashboard: the pair showed a last_sync_at and nothing else, which makes the
+// history view useless for exactly the pairs that run unattended.
+func TestRunOneShot_WritesSyncLog(t *testing.T) {
+	repo := runTestRepo(t)
+	pair := runTestPair(t, repo, &config.SyncPair{Name: "logged"})
+
+	_ = RunOneShot(context.Background(), repo, pair.ID, filepath.Join(t.TempDir(), "cache.db"))
+
+	logs, err := repo.ListSyncLogs(pair.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("sync_logs rows = %d, want 1: a CLI sync leaves no history", len(logs))
+	}
+	if logs[0].Status == "" {
+		t.Error("the logged row has no status")
+	}
+}
+
+// A refused run must be logged too, not silently skipped: "the pair never ran
+// because its expiry passed" is the single most important history entry there
+// is, and an empty log is indistinguishable from a healthy pair.
+func TestRunOneShot_LogsRefusedRun(t *testing.T) {
+	repo := runTestRepo(t)
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	pair := runTestPair(t, repo, &config.SyncPair{Name: "dead", TargetExpireAt: &past})
+
+	_ = RunOneShot(context.Background(), repo, pair.ID, filepath.Join(t.TempDir(), "cache.db"))
+
+	logs, err := repo.ListSyncLogs(pair.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("sync_logs rows = %d, want 1", len(logs))
+	}
+	if logs[0].Status != "expired" {
+		t.Errorf("logged status = %q, want \"expired\"", logs[0].Status)
+	}
+	if logs[0].ErrorMsg == "" {
+		t.Error("the refused run was logged with no reason")
+	}
+}
