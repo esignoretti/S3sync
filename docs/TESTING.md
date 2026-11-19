@@ -301,7 +301,28 @@ Verified live against Cubbit DS3 with the real binary: a reset forced 5 objects
 to re-copy, the failing `locked.txt` produced exit 1, the history row recorded
 `error | 5 | 1`, and the three typo cases each exited 1.
 
-## 8. Known limits
+## 8. Silent no-op settings
+
+Re-running the suite against the live endpoint after the CLI fixes turned up two
+more values that were accepted and then made a pair do nothing, or far too much.
+Neither is visible from reading the code path that stores them.
+
+| Value | Measured effect | Fix |
+| --- | --- | --- |
+| `--workers 0` (also negative) | The pool starts `workers` goroutines to drain the actions channel. With none, every action is dropped: the run logs `sync complete ... succeeded=0 failed=0` and stores status `ok`. Reproduced live — a 12 MiB object added to the source, sync reported ok, target stayed empty, and the object was not cached either, so it would have stayed invisible forever | Rejected: `1..256` |
+| `--interval 0` (also negative) | The serve loop fires back to back: **79 sync cycles in 8 seconds**, each listing both buckets and writing the config database | Rejected: must be positive |
+
+`ValidatePairOptions` enforces both, so the CLI, the API and the wizard inherit
+the check — every creation and update path already called it.
+
+`SyncPair.ApplyDefaults` exists because a JSON body cannot distinguish an omitted
+`worker_count` from an explicit `0`; it runs only on the JSON paths
+(`createSyncPair`, the setup wizard). The CLI flags carry the default themselves,
+so `--workers 0` stays visible and is rejected instead of being quietly replaced.
+`TestApplyDefaultsDoesNotMaskCLIValues` pins that distinction: calling
+`ApplyDefaults` on the CLI path would mask exactly this class of typo.
+
+## 9. Known limits
 
 Stated plainly, because a test document that only lists successes is not useful.
 
@@ -317,6 +338,17 @@ Stated plainly, because a test document that only lists successes is not useful.
   the unit level (`internal/sync/multipart_test.go`, 13 tests) and was verified
   once by hand live: a 12 MiB object as 3 parts, byte-identical
   (`sha=9c2b38b1f4e85077`), 0 incomplete uploads afterwards.
+
+  It has now been run end to end once, which is how the following was found:
+  `TestScenarioLargeSecondSyncIsNoop` used a 60 s reconcile interval while
+  composing and copying 6 GiB takes ~90 s, so the sweep was due on *every*
+  cycle. The second sync therefore read one tag per cached object — the sweep's
+  documented cost — and the "no work" assertion failed on it. That was a test
+  defect, not a product one; the interval is now 3600 s and the sweep is forced
+  explicitly via `reconcile()`, which is both deterministic and what the test
+  means to exercise. Re-verified live: 114 s, PASS. The lesson generalises — an
+  interval shorter than a sync cycle turns a "no work" assertion into an
+  assertion about the sweep's own reads.
 - **Timing is not asserted.** No scenario asserts a duration or a throughput
   figure; those vary 3x between runs on this endpoint.
 - **COMPLIANCE fixtures use a 2-minute hold**, not the 1 day used for
@@ -329,7 +361,7 @@ Stated plainly, because a test document that only lists successes is not useful.
   deleted buckets, so the leak detector confirms each candidate with a `HeadBucket`
   before reporting.
 
-## 9. Leak hygiene
+## 10. Leak hygiene
 
 Scratch buckets are named `s3sync-sc-<unixnano>` and destroyed by a teardown that
 paginates `ListObjectVersions` (including delete markers), aborts incomplete
